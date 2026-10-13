@@ -57,4 +57,12 @@ router.post('/suppliers/batch', async (req, res) => {
   res.json({ success: true, saved: rows.length });
 });
 
+router.delete('/suppliers/:id', async (req, res) => {
+  const suppliers = await readJSON(FILE, []);
+  const filtered = suppliers.filter(s => s.id !== Number(req.params.id));
+  if (filtered.length === suppliers.length) return res.status(404).json({ error: 'Not found' });
+  await writeJSON(FILE, filtered);
+  res.json({ success: true });
+});
+
 module.exports = router;

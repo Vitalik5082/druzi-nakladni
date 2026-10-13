@@ -42,6 +42,7 @@
           <th>Умови</th>
           <th>Автопересилка бухгалтеру</th>
           <th>Ціни з ПДВ</th>
+          <th></th>
         </tr>
       </thead>
       <tbody id="tableBody"></tbody>
@@ -68,7 +69,7 @@ async function load() {
 function render() {
   const tbody = document.getElementById('tableBody');
   if (!suppliers.length) {
-    tbody.innerHTML = `<tr><td colspan="7"><div class="empty"><div class="empty-title">Немає постачальників</div></div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8"><div class="empty"><div class="empty-title">Немає постачальників</div></div></td></tr>`;
     return;
   }
 
@@ -98,6 +99,7 @@ function render() {
           так
         </label>
       </td>
+      <td><button class="btn sm danger" onclick="deleteSupplier(${s.id})">✕</button></td>
     </tr>`;
   }).join('');
 }
@@ -143,6 +145,18 @@ document.getElementById('addBtn').addEventListener('click', async () => {
     showToast('Помилка збереження', 'error');
   }
 });
+
+async function deleteSupplier(id) {
+  if (!confirm('Видалити цього постачальника? Це не видалить уже збережені накладні.')) return;
+  try {
+    const res = await authFetch(`/api/suppliers/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error();
+    showToast('✓ Видалено', 'success');
+    load();
+  } catch {
+    showToast('Помилка видалення', 'error');
+  }
+}
 
 function escHtml(s) {
   return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
