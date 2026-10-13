@@ -206,6 +206,7 @@ function renderInvoiceRow(inv) {
         <span class="status-badge ${inv.status}">${statusLabel(inv.status)}</span>
         ${inv.pendingReview ? `<button class="btn sm" onclick="event.stopPropagation(); confirmReview(${inv.id})">✓ Підтвердити</button>` : ''}
         <button class="btn sm" onclick="event.stopPropagation(); openPayModal(${inv.id})">Оплата</button>
+        <button class="btn sm danger" onclick="event.stopPropagation(); deleteInvoice(${inv.id})">✕</button>
       </div>
     </div>
     <div class="inv-items">
@@ -286,6 +287,18 @@ async function confirmPay() {
     loadInvoices();
   } catch {
     showToast('Помилка збереження', 'error');
+  }
+}
+
+async function deleteInvoice(id) {
+  if (!confirm('Видалити цю накладну з реєстру? Якщо треба — її можна буде знову залити через Telegram-бот або завантажити на сайті.')) return;
+  try {
+    const res = await authFetch(`/api/invoices/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error();
+    showToast('✓ Видалено', 'success');
+    loadInvoices();
+  } catch {
+    showToast('Помилка видалення', 'error');
   }
 }
 

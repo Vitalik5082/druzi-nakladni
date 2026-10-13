@@ -41,6 +41,7 @@
           <th>Контакт (ім'я, Viber/телефон, сайт)</th>
           <th>Умови</th>
           <th>Автопересилка бухгалтеру</th>
+          <th>Ціни з ПДВ</th>
         </tr>
       </thead>
       <tbody id="tableBody"></tbody>
@@ -67,7 +68,7 @@ async function load() {
 function render() {
   const tbody = document.getElementById('tableBody');
   if (!suppliers.length) {
-    tbody.innerHTML = `<tr><td colspan="6"><div class="empty"><div class="empty-title">Немає постачальників</div></div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7"><div class="empty"><div class="empty-title">Немає постачальників</div></div></td></tr>`;
     return;
   }
 
@@ -91,6 +92,12 @@ function render() {
           пересилати одразу
         </label>
       </td>
+      <td style="text-align:center">
+        <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text2)" title="Якщо позначено — у накладних цього постачальника ціни вказані ВЖЕ з ПДВ (ми не додаємо ще 20% зверху, а виокремлюємо його з ціни)">
+          <input type="checkbox" class="vat-included-check" data-id="${s.id}" ${s.pricesIncludeVat ? 'checked' : ''}>
+          так
+        </label>
+      </td>
     </tr>`;
   }).join('');
 }
@@ -101,7 +108,8 @@ document.getElementById('saveAllBtn').addEventListener('click', async () => {
     orderDays: Array.from(tr.querySelectorAll('.day-check:checked')).map(c => Number(c.value)),
     contact: tr.querySelector('.contact-input').value.trim(),
     terms: tr.querySelector('.terms-input').value.trim(),
-    telegramInvoicesAllowed: tr.querySelector('.telegram-allowed-check').checked
+    telegramInvoicesAllowed: tr.querySelector('.telegram-allowed-check').checked,
+    pricesIncludeVat: tr.querySelector('.vat-included-check').checked
   }));
 
   document.getElementById('saveStatus').textContent = 'Збереження...';

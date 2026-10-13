@@ -195,6 +195,13 @@ router.post('/telegram/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
+    // The registered recipient name (e.g. "Віталій (адмін)") is our own label; admin specifically
+    // wants to see the real Telegram handle of whoever sent the photo, visible both in the site's
+    // pending-invoice badge and in the forwarded TG notification.
+    const from = message.from || {};
+    const tgHandle = from.username ? `@${from.username}` : [from.first_name, from.last_name].filter(Boolean).join(' ');
+    const submittedByLabel = tgHandle ? `${sender.name} (${tgHandle})` : sender.name;
+
     if (!message.photo || !message.photo.length) {
       await reply(chatId, sender.role === 'accountant'
         ? 'Надішліть фото чека про оплату — я знайду відповідну накладну за сумою боргу.'
@@ -224,7 +231,7 @@ router.post('/telegram/webhook', async (req, res) => {
       date: result.date,
       items: result.items,
       source: 'telegram',
-      submittedBy: sender.name,
+      submittedBy: submittedByLabel,
       pendingReview: true
     });
 
@@ -250,7 +257,7 @@ router.post('/telegram/webhook', async (req, res) => {
 
     for (const r of toNotify) {
       await reply(r.chatId,
-        `🧾 Нова накладна від ${sender.name} (через бот):\n` +
+        `🧾 Нова накладна від ${submittedByLabel} (через бот):\n` +
         `Постачальник: ${inv.supplier}\nДата: ${inv.date}\nСума: ${inv.total.toFixed(2)} ₴\n` +
         `Статус: на перевірці.${forwardToAccountant ? '' : ' Постачальника не позначено для автопересилки — перевірте вручну.'}\n` +
         `Перевірте на сайті в розділі "Накладні".`);

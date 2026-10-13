@@ -27,12 +27,13 @@ router.patch('/suppliers/:id', async (req, res) => {
   const supplier = suppliers.find(s => s.id === Number(req.params.id));
   if (!supplier) return res.status(404).json({ error: 'Not found' });
 
-  const { name, contact, terms, orderDays, telegramInvoicesAllowed } = req.body;
+  const { name, contact, terms, orderDays, telegramInvoicesAllowed, pricesIncludeVat } = req.body;
   if (name !== undefined) supplier.name = name;
   if (contact !== undefined) supplier.contact = contact;
   if (terms !== undefined) supplier.terms = terms;
   if (orderDays !== undefined) supplier.orderDays = Array.isArray(orderDays) ? orderDays.map(Number) : [];
   if (telegramInvoicesAllowed !== undefined) supplier.telegramInvoicesAllowed = !!telegramInvoicesAllowed;
+  if (pricesIncludeVat !== undefined) supplier.pricesIncludeVat = !!pricesIncludeVat;
 
   await writeJSON(FILE, suppliers);
   res.json(supplier);
@@ -50,6 +51,7 @@ router.post('/suppliers/batch', async (req, res) => {
     if (row.contact !== undefined) supplier.contact = row.contact;
     if (row.terms !== undefined) supplier.terms = row.terms;
     if (row.telegramInvoicesAllowed !== undefined) supplier.telegramInvoicesAllowed = !!row.telegramInvoicesAllowed;
+    if (row.pricesIncludeVat !== undefined) supplier.pricesIncludeVat = !!row.pricesIncludeVat;
   }
   await writeJSON(FILE, suppliers);
   res.json({ success: true, saved: rows.length });

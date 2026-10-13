@@ -45,6 +45,32 @@ function findDuplicate(invoices, supplier, date, total) {
   );
 }
 
+// Some suppliers (e.g. Проценко/Плахотнік, Поділля Фуд) print line prices that are ALREADY
+// gross (with ПДВ) rather than net — unlike most suppliers (Ольга-Торг, Пшеничний, Метро,
+// Буковина-Трек, Баядера), who print net prices and only add 20% as one lump sum at the very
+// end. convertItem()/withVat() always assumes the net-price case (price → price*1.2 "with
+// vat"), so for a pricesIncludeVat supplier that math is backwards and needs reversing: the
+// AI-extracted price/total IS the gross figure, and net = gross / VAT_RATE.
+function reverseVatDirection(items) {
+  return items.map(item => {
+    if (item.skipped) return item;
+    const grossPrice = item.price || 0;
+    const grossTotal = item.total || 0;
+    const fixed = {
+      ...item,
+      price: Number((grossPrice / VAT_RATE).toFixed(6)),
+      price_with_vat: grossPrice,
+      total: Number((grossTotal / VAT_RATE).toFixed(2)),
+      total_with_vat: grossTotal
+    };
+    if (item.price_per_g) {
+      fixed.price_per_g_with_vat = item.price_per_g;
+      fixed.price_per_g = Number((item.price_per_g / VAT_RATE).toFixed(6));
+    }
+    return fixed;
+  });
+}
+
 // Shared by the website's POST /invoices AND the Telegram bot. Returns either
 // { duplicate: true, existing } or { invoice }.
 async function createInvoice({ supplier, date, items, dueDate, force, source, submittedBy, pendingReview }) {
@@ -54,9 +80,16 @@ async function createInvoice({ supplier, date, items, dueDate, force, source, su
     throw err;
   }
 
-  const total = items.filter(i => !i.skipped).reduce((s, i) => s + (i.total || 0), 0);
   const invoiceDate = date || localDateStr();
   const invoiceSupplier = (supplier || '').trim();
+
+  const suppliersList = await readJSON(SUPPLIERS_FILE, []);
+  const supplierRecord = suppliersList.find(s => s.name.toLowerCase() === invoiceSupplier.toLowerCase());
+  if (supplierRecord && supplierRecord.pricesIncludeVat) {
+    items = reverseVatDirection(items);
+  }
+
+  const total = items.filter(i => !i.skipped).reduce((s, i) => s + (i.total || 0), 0);
 
   const invoices = await readJSON(FILE, []);
 
