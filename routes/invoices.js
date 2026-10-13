@@ -160,7 +160,7 @@ router.post('/invoices', async (req, res) => {
 });
 
 // Shared by the website's PATCH /invoices/:id AND the Telegram bot's payment-status buttons.
-async function updateInvoice(id, { paidAmount, paidDate, dueDate, supplier, date, pendingReview }) {
+async function updateInvoice(id, { paidAmount, paidDate, dueDate, supplier, date, pendingReview, items }) {
   const invoices = await readJSON(FILE, []);
   const invoice = invoices.find(inv => inv.id === Number(id));
   if (!invoice) return null;
@@ -171,6 +171,25 @@ async function updateInvoice(id, { paidAmount, paidDate, dueDate, supplier, date
   if (supplier !== undefined) invoice.supplier = supplier;
   if (date !== undefined) invoice.date = date;
   if (pendingReview !== undefined) invoice.pendingReview = !!pendingReview;
+
+  // Manual qty/price correction (reєстр накладних): qty and price (excl. VAT) are the editable
+  // source of truth, everything else (total, with-VAT figures) is derived — same price/price_with_vat
+  // direction the invoice was originally created with, just recomputed off the corrected numbers.
+  if (Array.isArray(items)) {
+    invoice.items = items.map(item => {
+      if (item.skipped) return item;
+      const qty = Number(item.qty) || 0;
+      const price = Number(item.price) || 0;
+      const total = Number((qty * price).toFixed(2));
+      return {
+        ...item, qty, price, total,
+        price_with_vat: Number((price * VAT_RATE).toFixed(6)),
+        total_with_vat: Number((total * VAT_RATE).toFixed(2))
+      };
+    });
+    invoice.total = Number(invoice.items.filter(i => !i.skipped).reduce((s, i) => s + (i.total || 0), 0).toFixed(2));
+    invoice.total_with_vat = Number((invoice.total * VAT_RATE).toFixed(2));
+  }
 
   await writeJSON(FILE, invoices);
   if (supplier) await ensureSupplier(supplier);

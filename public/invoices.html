@@ -109,6 +109,20 @@
   </div>
 </div>
 
+<!-- MATCH MODAL -->
+<div class="modal-overlay" id="matchModal">
+  <div class="modal">
+    <div class="modal-title">Змінити відповідність</div>
+    <div class="modal-sub" id="modalSub">Оберіть продукт зі списку</div>
+    <input class="modal-search" id="modalSearch" placeholder="Пошук продукту..." oninput="filterProducts()">
+    <div class="modal-list" id="modalList"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Скасувати</button>
+      <button class="btn primary" onclick="confirmMatch()">Зберегти</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -116,6 +130,15 @@ let invoices = [];
 let payModalId = null;
 const openFolders = new Set();
 const openInvoices = new Set();
+const editingInvoices = new Set();
+
+let allProducts = [];
+async function loadProducts() {
+  try {
+    const res = await authFetch('/products');
+    allProducts = await res.json();
+  } catch { allProducts = []; }
+}
 
 async function loadInvoices() {
   const params = new URLSearchParams();
@@ -192,6 +215,7 @@ function render() {
 
 function renderInvoiceRow(inv) {
   const isOpen = openInvoices.has(inv.id);
+  const isEditing = editingInvoices.has(inv.id);
   return `
   <div class="inv-row ${isOpen ? 'open' : ''}" data-inv="${inv.id}">
     <div class="inv-head" onclick="toggleInvoice(${inv.id})">
@@ -206,6 +230,10 @@ function renderInvoiceRow(inv) {
         <span class="status-badge ${inv.status}">${statusLabel(inv.status)}</span>
         ${inv.pendingReview ? `<button class="btn sm" onclick="event.stopPropagation(); confirmReview(${inv.id})">✓ Підтвердити</button>` : ''}
         <button class="btn sm" onclick="event.stopPropagation(); openPayModal(${inv.id})">Оплата</button>
+        ${isEditing
+          ? `<button class="btn sm primary" onclick="event.stopPropagation(); saveInvoiceItems(${inv.id})">💾 Зберегти</button>
+             <button class="btn sm" onclick="event.stopPropagation(); cancelEditItems(${inv.id})">Скасувати</button>`
+          : `<button class="btn sm" onclick="event.stopPropagation(); editInvoiceItems(${inv.id})">✏️ Редагувати</button>`}
         <button class="btn sm danger" onclick="event.stopPropagation(); deleteInvoice(${inv.id})">✕</button>
       </div>
     </div>
@@ -220,17 +248,29 @@ function renderInvoiceRow(inv) {
               <th style="text-align:right">Ціна (без ПДВ)</th>
               <th style="text-align:right">Ціна (з ПДВ)</th>
               <th style="text-align:right">Сума</th>
+              <th></th>
             </tr>
           </thead>
-          <tbody>
+          <tbody id="itemsBody-${inv.id}">
             ${inv.items.filter(i => !i.skipped).map(i => `
-              <tr>
-                <td>${escHtml(i.name)}</td>
-                <td style="text-align:right">${i.qty}</td>
+              <tr data-item-id="${i.id}">
+                <td>
+                  <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+                    <span>${escHtml(i.name)}</span>
+                    ${i.isNewProduct ? `<span class="invoice-badge" style="background:rgba(255,92,92,.1);color:var(--danger);border-color:rgba(255,92,92,.3)">новий товар — немає в довіднику</span>` : ''}
+                  </div>
+                  ${i.original_name && i.original_name !== i.name ? `<div class="original-name" style="font-size:10px;color:var(--text3)">${escHtml(i.original_name)}</div>` : ''}
+                </td>
+                <td style="text-align:right">${isEditing
+                  ? `<input type="number" step="any" class="item-qty-input" style="width:80px;text-align:right" value="${i.qty}" oninput="recalcItemRow(${inv.id}, ${i.id})">`
+                  : i.qty}</td>
                 <td><span class="unit-badge">${i.unit}</span></td>
-                <td style="text-align:right">${(i.price||0).toFixed(2)} ₴</td>
-                <td style="text-align:right">${(i.price_with_vat || i.price*1.2 || 0).toFixed(2)} ₴</td>
-                <td style="text-align:right" class="total-cell">${(i.total||0).toFixed(2)} ₴</td>
+                <td style="text-align:right">${isEditing
+                  ? `<input type="number" step="any" class="item-price-input" style="width:90px;text-align:right" value="${i.price||0}" oninput="recalcItemRow(${inv.id}, ${i.id})">`
+                  : (i.price||0).toFixed(2) + ' ₴'}</td>
+                <td style="text-align:right" class="item-price-vat-cell">${(i.price_with_vat || i.price*1.2 || 0).toFixed(2)} ₴</td>
+                <td style="text-align:right" class="total-cell item-total-cell">${(i.total||0).toFixed(2)} ₴</td>
+                <td><button class="btn sm" onclick="event.stopPropagation(); openMatchModal(${inv.id}, ${i.id})" title="Змінити відповідність товару">✎</button></td>
               </tr>
             `).join('')}
           </tbody>
@@ -290,6 +330,134 @@ async function confirmPay() {
   }
 }
 
+function editInvoiceItems(id) {
+  editingInvoices.add(id);
+  render();
+}
+
+function cancelEditItems(id) {
+  editingInvoices.delete(id);
+  render();
+}
+
+function recalcItemRow(invId, itemId) {
+  const row = document.querySelector(`#itemsBody-${invId} tr[data-item-id="${itemId}"]`);
+  if (!row) return;
+  const qty = parseFloat(row.querySelector('.item-qty-input').value) || 0;
+  const price = parseFloat(row.querySelector('.item-price-input').value) || 0;
+  const total = qty * price;
+  row.querySelector('.item-price-vat-cell').textContent = (price * 1.2).toFixed(2) + ' ₴';
+  row.querySelector('.item-total-cell').textContent = total.toFixed(2) + ' ₴';
+}
+
+async function saveInvoiceItems(id) {
+  const inv = invoices.find(i => i.id === id);
+  if (!inv) return;
+
+  const edited = {};
+  document.querySelectorAll(`#itemsBody-${id} tr[data-item-id]`).forEach(row => {
+    const itemId = Number(row.dataset.itemId);
+    edited[itemId] = {
+      qty: parseFloat(row.querySelector('.item-qty-input').value) || 0,
+      price: parseFloat(row.querySelector('.item-price-input').value) || 0
+    };
+  });
+
+  const items = inv.items.map(item => edited[item.id] ? { ...item, ...edited[item.id] } : item);
+
+  try {
+    const res = await authFetch(`/api/invoices/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items })
+    });
+    if (!res.ok) throw new Error();
+    editingInvoices.delete(id);
+    showToast('✓ Збережено', 'success');
+    loadInvoices();
+  } catch {
+    showToast('Помилка збереження', 'error');
+  }
+}
+
+// ── MATCH MODAL (виправити відповідність товару довіднику) ──────────
+let currentModalInvId = null, currentModalItemId = null, selectedProduct = null;
+
+function openMatchModal(invId, itemId) {
+  currentModalInvId = invId;
+  currentModalItemId = itemId;
+  selectedProduct = null;
+  const inv = invoices.find(i => i.id === invId);
+  const item = inv && inv.items.find(i => i.id === itemId);
+  if (!item) return;
+  document.getElementById('modalSub').textContent = `"${item.original_name || item.name}" → зараз: "${item.name}"`;
+  document.getElementById('modalSearch').value = '';
+  filterProducts();
+  document.getElementById('matchModal').classList.add('open');
+  setTimeout(() => document.getElementById('modalSearch').focus(), 50);
+}
+
+function closeModal() {
+  document.getElementById('matchModal').classList.remove('open');
+  currentModalInvId = null;
+  currentModalItemId = null;
+  selectedProduct = null;
+}
+
+function filterProducts() {
+  const q = document.getElementById('modalSearch').value.toLowerCase();
+  const list = document.getElementById('modalList');
+  const filtered = allProducts.length
+    ? allProducts.filter(p => p.toLowerCase().includes(q)).slice(0, 50)
+    : [];
+
+  if (!filtered.length) {
+    list.innerHTML = `<div class="modal-item" style="color:var(--text3)">Список продуктів порожній</div>`;
+    return;
+  }
+
+  list.innerHTML = filtered.map(p => {
+    const sel = selectedProduct === p ? 'selected' : '';
+    return `<div class="modal-item ${sel}" onclick="selectProduct('${escAttr(p)}')">${escHtml(p)}</div>`;
+  }).join('');
+}
+
+function selectProduct(name) {
+  selectedProduct = name;
+  document.querySelectorAll('.modal-item').forEach(el => {
+    el.classList.toggle('selected', el.textContent === name);
+  });
+}
+
+async function confirmMatch() {
+  if (!selectedProduct || currentModalInvId === null || currentModalItemId === null) return;
+
+  const inv = invoices.find(i => i.id === currentModalInvId);
+  const item = inv && inv.items.find(i => i.id === currentModalItemId);
+  if (!item) return;
+
+  const items = inv.items.map(i => i.id === currentModalItemId
+    ? { ...i, name: selectedProduct, matched: true, isNewProduct: false }
+    : i);
+
+  try {
+    await authFetch('/learn', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ original: item.original_name || item.name, selected: selectedProduct })
+    });
+    const res = await authFetch(`/api/invoices/${inv.id}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items })
+    });
+    if (!res.ok) throw new Error();
+    closeModal();
+    showToast('✓ Відповідність збережено', 'success');
+    loadInvoices();
+  } catch {
+    showToast('Помилка збереження', 'error');
+  }
+}
+
 async function deleteInvoice(id) {
   if (!confirm('Видалити цю накладну з реєстру? Якщо треба — її можна буде знову залити через Telegram-бот або завантажити на сайті.')) return;
   try {
@@ -342,8 +510,12 @@ document.getElementById('clearFilterBtn').addEventListener('click', () => {
 document.getElementById('payModal').addEventListener('click', e => {
   if (e.target === e.currentTarget) closePayModal();
 });
+document.getElementById('matchModal').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeModal();
+});
 
 loadInvoices();
+loadProducts();
 </script>
 </body>
 </html>
