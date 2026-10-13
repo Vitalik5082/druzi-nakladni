@@ -245,7 +245,7 @@ function renderInvoiceRow(inv) {
         <span class="inv-chevron" style="display:inline-block;transition:transform .15s;color:var(--text3)">▸</span>
         <span>${inv.date}</span>
         <span>${inv.items.filter(i=>!i.skipped).length} позицій</span>
-        <select onclick="event.stopPropagation()" onchange="event.stopPropagation(); changeInvoiceSupplier(${inv.id}, this.value)"
+        <select class="supplier-select" onclick="event.stopPropagation()" onchange="event.stopPropagation(); changeInvoiceSupplier(${inv.id}, this.value)"
           style="${inv.supplier ? '' : 'border-color:var(--danger);color:var(--danger)'}">
           <option value="">— без постачальника —</option>
           ${allSuppliers.map(s => `<option value="${escAttr(s.name)}" ${s.name === inv.supplier ? 'selected' : ''}>${escHtml(s.name)}</option>`).join('')}

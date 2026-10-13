@@ -350,6 +350,19 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
   color: var(--text);
 }
 
+.supplier-select {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 4px 6px;
+  cursor: pointer;
+  max-width: 180px;
+}
+.supplier-select:focus { outline: none; border-color: var(--accent); }
+
 .unit-select {
   background: var(--bg3);
   border: 1px solid var(--border);
