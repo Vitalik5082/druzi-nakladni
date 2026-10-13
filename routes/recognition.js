@@ -160,6 +160,15 @@ CRITICAL — for qty, use this priority:
 2. "Кількість" / "К-сть" column
 3. "Брутто" only if no net column exists
 
+CRITICAL — packs containing a stated number of individual pieces: if the invoice's "Кількість" column
+is a number of PACKS/CASES (пачок/уп/ящ) and there's a separate note of how many individual pieces are
+in one pack (e.g. "50шт в пач", "50 шт/уп", "х50"), qty MUST be the TOTAL individual piece count
+(packs × pieces-per-pack), not the pack count — and price MUST be the price per ONE individual piece
+(printed line total ÷ total pieces), not the price per pack:
+  Invoice shows: "Норі, 8 пач (50шт в пач), ціна за пач 420 грн" → sum = 8×420 = 3360
+  ✅ { "name": "Норі", "qty": 400, "unit": "pcs", "price": 8.4 }   (400 = 8×50, 8.4 = 3360/400)
+  ❌ { "name": "Норі", "qty": 8, "unit": "pcs", "price": 420 }     — WRONG, that's pack count/pack price
+
 Rules for identifying the supplier when there's no clear letterhead/company name printed:
 - If the document contains the phrase "Бланк Замовлення" anywhere, the supplier is "Кока-Кола"`;
 
