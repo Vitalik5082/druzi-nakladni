@@ -34,7 +34,7 @@
     <span id="syncStatus" style="font-size:11px;color:var(--text3);margin-left:8px"></span>
   </div>
 
-  <div class="stats-row" style="grid-template-columns:repeat(2,1fr)">
+  <div class="stats-row" style="grid-template-columns:repeat(3,1fr)">
     <div class="stat-card">
       <div class="stat-label">Днів</div>
       <div class="stat-value info" id="statDays">0</div>
@@ -42,6 +42,10 @@
     <div class="stat-card">
       <div class="stat-label">Разом за період</div>
       <div class="stat-value green" id="statTotal">0 ₴</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Середнє значення</div>
+      <div class="stat-value info" id="statAvg">0 ₴</div>
     </div>
   </div>
 
@@ -94,8 +98,10 @@ async function loadDays() {
   const days = await res.json();
   const tbody = document.getElementById('tableBody');
 
+  const total = days.reduce((s, d) => s + d.revenue, 0);
   document.getElementById('statDays').textContent = days.length;
-  document.getElementById('statTotal').textContent = days.reduce((s, d) => s + d.revenue, 0).toFixed(2) + ' ₴';
+  document.getElementById('statTotal').textContent = total.toFixed(2) + ' ₴';
+  document.getElementById('statAvg').textContent = (days.length ? total / days.length : 0).toFixed(2) + ' ₴';
 
   if (!days.length) {
     tbody.innerHTML = `<tr><td colspan="5"><div class="empty">

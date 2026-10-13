@@ -202,7 +202,9 @@ function renderInvoiceRow(inv) {
       </div>
       <div class="inv-meta">
         <span class="total-cell">${(inv.total||0).toFixed(2)} ₴ <span style="color:var(--text3);font-weight:400">(з ПДВ ${(inv.total_with_vat || inv.total*1.2).toFixed(2)} ₴)</span></span>
+        ${inv.pendingReview ? `<span class="status-badge unpaid" title="Надіслано ${escHtml(inv.submittedBy || '')} через Telegram-бот">⏳ На перевірці (бот)</span>` : ''}
         <span class="status-badge ${inv.status}">${statusLabel(inv.status)}</span>
+        ${inv.pendingReview ? `<button class="btn sm" onclick="event.stopPropagation(); confirmReview(${inv.id})">✓ Підтвердити</button>` : ''}
         <button class="btn sm" onclick="event.stopPropagation(); openPayModal(${inv.id})">Оплата</button>
       </div>
     </div>
@@ -281,6 +283,21 @@ async function confirmPay() {
     if (!res.ok) throw new Error();
     closePayModal();
     showToast('✓ Оплату збережено', 'success');
+    loadInvoices();
+  } catch {
+    showToast('Помилка збереження', 'error');
+  }
+}
+
+async function confirmReview(id) {
+  try {
+    const res = await authFetch(`/api/invoices/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pendingReview: false })
+    });
+    if (!res.ok) throw new Error();
+    showToast('✓ Підтверджено', 'success');
     loadInvoices();
   } catch {
     showToast('Помилка збереження', 'error');

@@ -66,14 +66,26 @@
     </div>
   </div>
 
-  <div class="stats-row" style="grid-template-columns:repeat(2,1fr)">
+  <div class="stats-row" style="grid-template-columns:repeat(3,1fr)">
     <div class="stat-card">
-      <div class="stat-label">Чистий прибуток</div>
-      <div class="stat-value" id="statProfit" style="font-size:24px">0 ₴</div>
+      <div class="stat-label">Прибуток до ЗП адміна</div>
+      <div class="stat-value" id="statProfitBeforeAdmin" style="font-size:22px">0 ₴</div>
     </div>
     <div class="stat-card">
+      <div class="stat-label">ЗП адміна</div>
+      <div class="stat-value warn" id="statAdminSalary" style="font-size:22px">0 ₴</div>
+      <div class="stat-note" id="noteAdminSalary"></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Прибуток після ЗП адміна</div>
+      <div class="stat-value" id="statProfit" style="font-size:22px">0 ₴</div>
+    </div>
+  </div>
+
+  <div class="stats-row" style="grid-template-columns:repeat(1,1fr)">
+    <div class="stat-card">
       <div class="stat-label">Фудкост %</div>
-      <div class="stat-value" id="statFoodcost" style="font-size:24px">—</div>
+      <div class="stat-value" id="statFoodcost" style="font-size:20px">—</div>
       <div class="stat-note">Орієнтовно: товари / виручка. Точний фудкост потребує техкарт з Poster.</div>
     </div>
   </div>
@@ -135,10 +147,15 @@ async function loadDashboard() {
     document.getElementById('notePayroll').textContent =
       `${data.payrollEntriesCount} виплат вручну (${fmt(data.payrollManual)}) + з Poster ${fmt(data.payrollFromPoster)}`;
 
+    document.getElementById('statProfitBeforeAdmin').textContent = fmt(data.profitBeforeAdmin);
+
+    document.getElementById('statAdminSalary').textContent = fmt(data.adminSalary);
+    document.getElementById('noteAdminSalary').textContent = `${data.adminPct}% від виручки`;
+
     const profitEl = document.getElementById('statProfit');
-    profitEl.textContent = fmt(data.profit);
-    profitEl.className = 'stat-value ' + (data.profit >= 0 ? 'green' : 'danger');
-    profitEl.style.fontSize = '24px';
+    profitEl.textContent = fmt(data.profitAfterAdmin);
+    profitEl.className = 'stat-value ' + (data.profitAfterAdmin >= 0 ? 'green' : 'danger');
+    profitEl.style.fontSize = '22px';
 
     document.getElementById('statFoodcost').textContent =
       data.foodCostPct === null ? '—' : data.foodCostPct + '%';

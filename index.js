@@ -14,6 +14,10 @@ app.use(bodyParser.json());
 // check below, 401-ing even login.html itself.
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Telegram calls this with its own secret_token header, not a Supabase Bearer — must sit before
+// the auth gate below, or every webhook delivery 401s.
+app.use(require('./routes/telegram'));
+
 async function verifySupabaseToken(token) {
   try {
     const res = await fetch(`${process.env.SUPABASE_URL}/auth/v1/user`, {

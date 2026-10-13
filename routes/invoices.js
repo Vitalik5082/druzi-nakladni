@@ -45,6 +45,50 @@ function findDuplicate(invoices, supplier, date, total) {
   );
 }
 
+// Shared by the website's POST /invoices AND the Telegram bot. Returns either
+// { duplicate: true, existing } or { invoice }.
+async function createInvoice({ supplier, date, items, dueDate, force, source, submittedBy, pendingReview }) {
+  if (!Array.isArray(items) || !items.length) {
+    const err = new Error('No items');
+    err.status = 400;
+    throw err;
+  }
+
+  const total = items.filter(i => !i.skipped).reduce((s, i) => s + (i.total || 0), 0);
+  const invoiceDate = date || localDateStr();
+  const invoiceSupplier = (supplier || '').trim();
+
+  const invoices = await readJSON(FILE, []);
+
+  if (!force) {
+    const dup = findDuplicate(invoices, invoiceSupplier, invoiceDate, total);
+    if (dup) return { duplicate: true, existing: { ...dup, status: deriveStatus(dup) } };
+  }
+
+  const invoice = {
+    id: nextId(invoices),
+    date: invoiceDate,
+    supplier: invoiceSupplier,
+    items,
+    total,
+    total_with_vat: Number((total * VAT_RATE).toFixed(2)),
+    paidAmount: 0,
+    paidDate: null,
+    dueDate: dueDate || null,
+    source: source || 'web',
+    submittedBy: submittedBy || null,
+    pendingReview: !!pendingReview,
+    createdAt: new Date().toISOString()
+  };
+
+  invoices.push(invoice);
+  await writeJSON(FILE, invoices);
+  await ensureSupplier(invoice.supplier);
+  await learnSupplierFromItems(items, invoice.supplier);
+
+  return { invoice: { ...invoice, status: deriveStatus(invoice) } };
+}
+
 router.get('/invoices', async (req, res) => {
   const { status, supplier, from, to } = req.query;
   const raw = await readJSON(FILE, []);
@@ -67,45 +111,19 @@ router.get('/invoices/:id', async (req, res) => {
 });
 
 router.post('/invoices', async (req, res) => {
-  const { supplier, date, items, dueDate, force } = req.body;
-  if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: 'No items' });
-
-  const total = items.filter(i => !i.skipped).reduce((s, i) => s + (i.total || 0), 0);
-  const invoiceDate = date || localDateStr();
-  const invoiceSupplier = (supplier || '').trim();
-
-  const invoices = await readJSON(FILE, []);
-
-  if (!force) {
-    const dup = findDuplicate(invoices, invoiceSupplier, invoiceDate, total);
-    if (dup) {
+  try {
+    const result = await createInvoice(req.body);
+    if (result.duplicate) {
       return res.status(409).json({
         error: 'duplicate',
-        message: `Схожа накладна вже є: ${dup.supplier || '—'} від ${dup.date} на суму ${dup.total.toFixed(2)} ₴`,
-        existing: { ...dup, status: deriveStatus(dup) }
+        message: `Схожа накладна вже є: ${result.existing.supplier || '—'} від ${result.existing.date} на суму ${result.existing.total.toFixed(2)} ₴`,
+        existing: result.existing
       });
     }
+    res.json(result.invoice);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
   }
-
-  const invoice = {
-    id: nextId(invoices),
-    date: invoiceDate,
-    supplier: invoiceSupplier,
-    items,
-    total,
-    total_with_vat: Number((total * VAT_RATE).toFixed(2)),
-    paidAmount: 0,
-    paidDate: null,
-    dueDate: dueDate || null,
-    createdAt: new Date().toISOString()
-  };
-
-  invoices.push(invoice);
-  await writeJSON(FILE, invoices);
-  await ensureSupplier(invoice.supplier);
-  await learnSupplierFromItems(items, invoice.supplier);
-
-  res.json({ ...invoice, status: deriveStatus(invoice) });
 });
 
 router.patch('/invoices/:id', async (req, res) => {
@@ -113,12 +131,13 @@ router.patch('/invoices/:id', async (req, res) => {
   const invoice = invoices.find(inv => inv.id === Number(req.params.id));
   if (!invoice) return res.status(404).json({ error: 'Not found' });
 
-  const { paidAmount, paidDate, dueDate, supplier, date } = req.body;
+  const { paidAmount, paidDate, dueDate, supplier, date, pendingReview } = req.body;
   if (paidAmount !== undefined) invoice.paidAmount = Number(paidAmount) || 0;
   if (paidDate !== undefined) invoice.paidDate = paidDate;
   if (dueDate !== undefined) invoice.dueDate = dueDate;
   if (supplier !== undefined) invoice.supplier = supplier;
   if (date !== undefined) invoice.date = date;
+  if (pendingReview !== undefined) invoice.pendingReview = !!pendingReview;
 
   await writeJSON(FILE, invoices);
   if (supplier) await ensureSupplier(supplier);
@@ -135,3 +154,4 @@ router.delete('/invoices/:id', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.createInvoice = createInvoice;

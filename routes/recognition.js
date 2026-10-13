@@ -132,31 +132,7 @@ async function suggestSupplier(items) {
   return best;
 }
 
-// =====================
-// UPLOAD + AI PARSING
-// =====================
-router.post('/upload', upload.single('file'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-
-  try {
-    await ensureLoaded();
-
-    const imageBase64 = req.file.buffer.toString('base64');
-    const ext = req.file.originalname?.split('.').pop()?.toLowerCase() || 'jpeg';
-    const mimeType = ext === 'png' ? 'image/png' : 'image/jpeg';
-
-    console.log('Sending image to OpenAI...');
-
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o",
-      max_tokens: 2000,
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: `Extract invoice data from this Ukrainian invoice (накладна) image.
+const INVOICE_PROMPT = `Extract invoice data from this Ukrainian invoice (накладна) image.
 Return ONLY a valid JSON object, no markdown, no explanation.
 Format: {
   "supplier": "supplier/vendor name as printed on the invoice letterhead, or empty string if not visible",
@@ -183,75 +159,96 @@ CRITICAL — for "шт" products WITH weight/volume in the name, keep unit as "p
 CRITICAL — for qty, use this priority:
 1. "Вага ч" / "Нетто" / "Net" column if exists → use that
 2. "Кількість" / "К-сть" column
-3. "Брутто" only if no net column exists`
-            },
-            {
-              type: "image_url",
-              image_url: {
-                url: `data:${mimeType};base64,${imageBase64}`,
-                detail: "high"
-              }
-            }
-          ]
-        }
-      ]
-    });
+3. "Брутто" only if no net column exists`;
 
-    const rawText = response.choices?.[0]?.message?.content || '';
-    console.log('AI raw response:', rawText.substring(0, 200));
+// Shared by the website's /upload AND the Telegram bot — one OCR+classification pipeline.
+async function recognizeInvoiceImage(imageBase64, mimeType) {
+  await ensureLoaded();
 
-    const cleaned = rawText
-      .replace(/```json\s*/gi, '')
-      .replace(/```\s*/g, '')
-      .trim();
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o",
+    max_tokens: 2000,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: INVOICE_PROMPT },
+          { type: "image_url", image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: "high" } }
+        ]
+      }
+    ]
+  });
 
-    let parsedData;
-    try {
-      parsedData = JSON.parse(cleaned);
-    } catch (e) {
-      console.error('JSON parse error. Raw:', rawText);
-      return res.status(500).json({ error: 'AI returned invalid JSON', raw: rawText });
-    }
+  const rawText = response.choices?.[0]?.message?.content || '';
+  const cleaned = rawText.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
 
-    // Backward-compatible: accept either {supplier,date,invoiceTotal,items} or a bare array
-    const parsedItems = Array.isArray(parsedData) ? parsedData : parsedData.items;
-    const aiSupplier = Array.isArray(parsedData) ? '' : (parsedData.supplier || '').trim();
-    const aiDate = Array.isArray(parsedData) ? '' : (parsedData.date || '').trim();
-    const aiInvoiceTotal = Array.isArray(parsedData) ? 0 : (Number(parsedData.invoiceTotal) || 0);
+  let parsedData;
+  try {
+    parsedData = JSON.parse(cleaned);
+  } catch (e) {
+    const err = new Error('AI returned invalid JSON');
+    err.raw = rawText;
+    throw err;
+  }
 
-    if (!Array.isArray(parsedItems)) {
-      return res.status(500).json({ error: 'AI response has no items array', raw: rawText });
-    }
+  // Backward-compatible: accept either {supplier,date,invoiceTotal,items} or a bare array
+  const parsedItems = Array.isArray(parsedData) ? parsedData : parsedData.items;
+  const aiSupplier = Array.isArray(parsedData) ? '' : (parsedData.supplier || '').trim();
+  const aiDate = Array.isArray(parsedData) ? '' : (parsedData.date || '').trim();
+  const aiInvoiceTotal = Array.isArray(parsedData) ? 0 : (Number(parsedData.invoiceTotal) || 0);
 
-    let portionRules = {};
-    try {
-      portionRules = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'public', 'portions.json'), 'utf-8'));
-    } catch (e) { console.warn('portions.json not found'); }
+  if (!Array.isArray(parsedItems)) {
+    const err = new Error('AI response has no items array');
+    err.raw = rawText;
+    throw err;
+  }
 
-    const unitOverrides = await readJSON('unitOverrides.json', {});
+  let portionRules = {};
+  try {
+    portionRules = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'public', 'portions.json'), 'utf-8'));
+  } catch (e) { console.warn('portions.json not found'); }
 
-    const mapped = parsedItems.map((item, idx) => {
-      const mappedName = findBestMatch(item.name);
-      const converted = convertItem(item, mappedName, portionRules, unitOverrides, idx);
-      return { ...converted, isNewProduct: isUnrecognizedProduct(item.name, mappedName) };
-    });
+  const unitOverrides = await readJSON('unitOverrides.json', {});
 
-    // Sum-check: AI-reported items vs AI-reported invoice grand total
-    const itemsSum = mapped.filter(i => !i.skipped).reduce((s, i) => s + (i.total || 0), 0);
-    let warning = null;
-    if (aiInvoiceTotal > 0 && Math.abs(itemsSum - aiInvoiceTotal) > 1) {
-      warning = `Сума розпізнаних позицій (${itemsSum.toFixed(2)} ₴) не збігається з сумою накладної (${aiInvoiceTotal.toFixed(2)} ₴) — перевір вручну, AI міг пропустити рядок або помилитись.`;
-    }
+  const mapped = parsedItems.map((item, idx) => {
+    const mappedName = findBestMatch(item.name);
+    const converted = convertItem(item, mappedName, portionRules, unitOverrides, idx);
+    return { ...converted, isNewProduct: isUnrecognizedProduct(item.name, mappedName) };
+  });
 
-    const supplier = aiSupplier || (await suggestSupplier(mapped)) || '';
+  const itemsSum = mapped.filter(i => !i.skipped).reduce((s, i) => s + (i.total || 0), 0);
+  let warning = null;
+  if (aiInvoiceTotal > 0 && Math.abs(itemsSum - aiInvoiceTotal) > 1) {
+    warning = `Сума розпізнаних позицій (${itemsSum.toFixed(2)} ₴) не збігається з сумою накладної (${aiInvoiceTotal.toFixed(2)} ₴) — перевір вручну, AI міг пропустити рядок або помилитись.`;
+  }
 
-    res.json({ success: true, items: mapped, count: mapped.length, supplier, date: aiDate, warning });
+  const supplier = aiSupplier || (await suggestSupplier(mapped)) || '';
+
+  return { items: mapped, count: mapped.length, supplier, date: aiDate, warning };
+}
+
+// =====================
+// UPLOAD + AI PARSING
+// =====================
+router.post('/upload', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+  try {
+    const imageBase64 = req.file.buffer.toString('base64');
+    const ext = req.file.originalname?.split('.').pop()?.toLowerCase() || 'jpeg';
+    const mimeType = ext === 'png' ? 'image/png' : 'image/jpeg';
+
+    console.log('Sending image to OpenAI...');
+    const result = await recognizeInvoiceImage(imageBase64, mimeType);
+
+    res.json({ success: true, ...result });
 
   } catch (err) {
     console.error('Upload error:', err);
 
     if (err.status === 401) return res.status(401).json({ error: 'Invalid OpenAI API key' });
     if (err.status === 429) return res.status(429).json({ error: 'OpenAI rate limit exceeded' });
+    if (err.raw) return res.status(500).json({ error: err.message, raw: err.raw });
 
     res.status(500).json({ error: err.message || 'Upload failed' });
   }
@@ -338,3 +335,4 @@ router.post('/export', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.recognizeInvoiceImage = recognizeInvoiceImage;

@@ -7,12 +7,13 @@ router.get('/dashboard', async (req, res) => {
   const { from, to } = req.query;
   if (!from || !to) return res.status(400).json({ error: 'from and to required' });
 
-  const [cashDaysAll, invoicesAll, expensesAll, payrollAll, posterFinance] = await Promise.all([
+  const [cashDaysAll, invoicesAll, expensesAll, payrollAll, posterFinance, employees] = await Promise.all([
     readJSON('cashdays.json', []),
     readJSON('invoices.json', []),
     readJSON('expenses.json', []),
     readJSON('payroll.json', []),
-    readJSON('posterFinance.json', {})
+    readJSON('posterFinance.json', {}),
+    readJSON('employees.json', [])
   ]);
 
   const cashDays = cashDaysAll.filter(d => d.date >= from && d.date <= to);
@@ -37,12 +38,23 @@ router.get('/dashboard', async (req, res) => {
 
   const otherExpenses = otherExpensesManual + otherExpensesFromPoster;
   const payrollTotal = payrollManual + payrollFromPoster;
-  const profit = revenue - goods - otherExpenses - payrollTotal;
+
+  // Адмін отримує % від виручки — рахується окремо від іншої ЗП, щоб завжди бути видимим,
+  // а не загубленим серед "інших витрат" (нараховується щойно, не через payroll.json/Poster).
+  const adminPct = employees
+    .filter(e => e.payType === 'percent_of_revenue')
+    .reduce((s, e) => s + (Number(e.percent) || 0), 0);
+  const adminSalary = Number((revenue * adminPct / 100).toFixed(2));
+
+  const profitBeforeAdmin = revenue - goods - otherExpenses - payrollTotal;
+  const profitAfterAdmin = Number((profitBeforeAdmin - adminSalary).toFixed(2));
   const foodCostPct = revenue > 0 ? Number((goods / revenue * 100).toFixed(1)) : null;
 
   res.json({
     from, to,
-    revenue, goods, otherExpenses, payroll: payrollTotal, profit, foodCostPct,
+    revenue, goods, otherExpenses, payroll: payrollTotal,
+    profit: profitBeforeAdmin, foodCostPct,
+    adminSalary, adminPct, profitBeforeAdmin, profitAfterAdmin,
     payrollManual, payrollFromPoster, otherExpensesManual, otherExpensesFromPoster,
     cashDaysCount: cashDays.length, invoicesCount: invoices.length,
     expensesCount: expenses.length, payrollEntriesCount: payroll.length

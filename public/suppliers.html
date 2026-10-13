@@ -40,6 +40,7 @@
           <th>Дні замовлення</th>
           <th>Контакт (ім'я, Viber/телефон, сайт)</th>
           <th>Умови</th>
+          <th>Накладні в боті</th>
         </tr>
       </thead>
       <tbody id="tableBody"></tbody>
@@ -66,7 +67,7 @@ async function load() {
 function render() {
   const tbody = document.getElementById('tableBody');
   if (!suppliers.length) {
-    tbody.innerHTML = `<tr><td colspan="5"><div class="empty"><div class="empty-title">Немає постачальників</div></div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6"><div class="empty"><div class="empty-title">Немає постачальників</div></div></td></tr>`;
     return;
   }
 
@@ -84,6 +85,12 @@ function render() {
       <td style="white-space:nowrap">${checkboxes}</td>
       <td><input class="modal-search contact-input" style="margin:0;width:220px" value="${escHtml(s.contact || '')}" placeholder="напр. Льоша, Viber 0685068409"></td>
       <td><input class="modal-search terms-input" style="margin:0;width:140px" value="${escHtml(s.terms || '')}"></td>
+      <td style="text-align:center">
+        <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text2)">
+          <input type="checkbox" class="telegram-allowed-check" data-id="${s.id}" ${s.telegramInvoicesAllowed ? 'checked' : ''}>
+          дозволено
+        </label>
+      </td>
     </tr>`;
   }).join('');
 }
@@ -93,7 +100,8 @@ document.getElementById('saveAllBtn').addEventListener('click', async () => {
     id: Number(tr.dataset.id),
     orderDays: Array.from(tr.querySelectorAll('.day-check:checked')).map(c => Number(c.value)),
     contact: tr.querySelector('.contact-input').value.trim(),
-    terms: tr.querySelector('.terms-input').value.trim()
+    terms: tr.querySelector('.terms-input').value.trim(),
+    telegramInvoicesAllowed: tr.querySelector('.telegram-allowed-check').checked
   }));
 
   document.getElementById('saveStatus').textContent = 'Збереження...';
