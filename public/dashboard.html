@@ -57,7 +57,7 @@
     <div class="stat-card">
       <div class="stat-label">Інші витрати</div>
       <div class="stat-value warn" id="statExpenses">0 ₴</div>
-      <div class="stat-note" id="noteExpenses"></div>
+      <div class="stat-note"><a href="#" id="toggleExpensesLink" onclick="toggleExpensesList(); return false" style="color:var(--text3);text-decoration:underline">—</a></div>
     </div>
     <div class="stat-card">
       <div class="stat-label">ЗП</div>
@@ -65,6 +65,8 @@
       <div class="stat-note" id="notePayroll"></div>
     </div>
   </div>
+
+  <div class="table-wrap" id="expensesListWrap" style="display:none;margin-bottom:16px"></div>
 
   <div class="stats-row" style="grid-template-columns:repeat(1,1fr)">
     <div class="stat-card">
@@ -103,6 +105,48 @@
 
 <script>
 function fmt(n) { return (n || 0).toFixed(2) + ' ₴'; }
+
+let currentFrom = null, currentTo = null;
+let expensesListOpen = false;
+
+async function toggleExpensesList() {
+  const wrap = document.getElementById('expensesListWrap');
+  expensesListOpen = !expensesListOpen;
+  const link = document.getElementById('toggleExpensesLink');
+
+  if (!expensesListOpen) {
+    wrap.style.display = 'none';
+    link.textContent = link.textContent.replace('приховати', 'показати');
+    return;
+  }
+
+  try {
+    const res = await authFetch(`/api/expenses?from=${currentFrom}&to=${currentTo}`);
+    const list = await res.json();
+    list.sort((a, b) => a.date.localeCompare(b.date));
+
+    wrap.innerHTML = `<table>
+      <thead><tr><th>Дата</th><th>Категорія</th><th>Опис</th><th style="text-align:right">Сума</th></tr></thead>
+      <tbody>${list.map(e => `
+        <tr>
+          <td>${e.date}</td>
+          <td><span class="unit-badge">${escHtml(e.category)}</span></td>
+          <td>${escHtml(e.description || '—')}</td>
+          <td style="text-align:right" class="total-cell">${e.amount.toFixed(2)} ₴</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+    wrap.style.display = 'block';
+    link.textContent = link.textContent.replace('показати', 'приховати');
+  } catch {
+    showToast('Не вдалось завантажити список', 'error');
+    expensesListOpen = false;
+  }
+}
+
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
 
 function applyPreset(preset) {
   const today = new Date();
@@ -151,7 +195,10 @@ async function loadDashboard() {
     document.getElementById('statGoods').textContent = fmt(data.goods);
 
     document.getElementById('statExpenses').textContent = fmt(data.otherExpenses);
-    document.getElementById('noteExpenses').textContent = `${data.expensesCount} записів`;
+    document.getElementById('toggleExpensesLink').textContent = `${data.expensesCount} записів — показати`;
+    document.getElementById('expensesListWrap').style.display = 'none';
+    document.getElementById('expensesListWrap').innerHTML = '';
+    currentFrom = from; currentTo = to;
 
     document.getElementById('statPayroll').textContent = fmt(data.payroll);
     document.getElementById('notePayroll').textContent =
