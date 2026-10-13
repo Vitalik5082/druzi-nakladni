@@ -274,7 +274,7 @@ function renderInvoiceRow(inv) {
               <th>Од.</th>
               <th style="text-align:right">Ціна (без ПДВ)</th>
               <th style="text-align:right">Ціна (з ПДВ)</th>
-              <th style="text-align:right">Сума</th>
+              <th style="text-align:right">Сума (з ПДВ)</th>
               <th></th>
             </tr>
           </thead>
@@ -296,7 +296,7 @@ function renderInvoiceRow(inv) {
                   ? `<input type="number" step="any" class="item-price-input" style="width:90px;text-align:right" value="${i.price||0}" oninput="recalcItemRow(${inv.id}, ${i.id})">`
                   : (i.price||0).toFixed(2) + ' ₴'}</td>
                 <td style="text-align:right" class="item-price-vat-cell">${(i.price_with_vat || i.price*1.2 || 0).toFixed(2)} ₴</td>
-                <td style="text-align:right" class="total-cell item-total-cell">${(i.total||0).toFixed(2)} ₴</td>
+                <td style="text-align:right" class="total-cell item-total-cell">${(i.total_with_vat || i.total*1.2 || 0).toFixed(2)} ₴</td>
                 <td><button class="btn sm" onclick="event.stopPropagation(); openMatchModal(${inv.id}, ${i.id})" title="Змінити відповідність товару">✎</button></td>
               </tr>
             `).join('')}
@@ -374,7 +374,7 @@ function recalcItemRow(invId, itemId) {
   const price = parseFloat(row.querySelector('.item-price-input').value) || 0;
   const total = qty * price;
   row.querySelector('.item-price-vat-cell').textContent = (price * 1.2).toFixed(2) + ' ₴';
-  row.querySelector('.item-total-cell').textContent = total.toFixed(2) + ' ₴';
+  row.querySelector('.item-total-cell').textContent = (total * 1.2).toFixed(2) + ' ₴';
 }
 
 async function saveInvoiceItems(id) {
