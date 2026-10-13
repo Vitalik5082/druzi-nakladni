@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const path = require('path');
 const bodyParser = require('body-parser');
 
 const app = express();
@@ -8,7 +9,10 @@ app.use(bodyParser.json());
 // Static pages/assets are always servable — page-level protection is client-side (public/auth.js),
 // same pattern druzi-menu already uses. Only requests that fall through here (no matching static
 // file — i.e. every API/action endpoint) reach the token check below.
-app.use(express.static('public'));
+// Absolute path (not 'public') — Vercel's serverless runtime doesn't run with cwd at the project
+// root, so a relative path silently matches nothing and every request fell through to the auth
+// check below, 401-ing even login.html itself.
+app.use(express.static(path.join(__dirname, 'public')));
 
 async function verifySupabaseToken(token) {
   try {
