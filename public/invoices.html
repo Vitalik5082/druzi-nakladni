@@ -71,7 +71,7 @@
       <div class="stat-value info" id="statCount">0</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Разом (без ПДВ)</div>
+      <div class="stat-label">Разом (з ПДВ)</div>
       <div class="stat-value" id="statTotal">0 ₴</div>
     </div>
     <div class="stat-card">
@@ -161,7 +161,7 @@ function statusLabel(s) {
 }
 
 function render() {
-  const total = invoices.reduce((s, i) => s + (i.total || 0), 0);
+  const total = invoices.reduce((s, i) => s + (i.total_with_vat || i.total * 1.2 || 0), 0);
   const debt = invoices.reduce((s, i) => s + Math.max(0, (i.total || 0) - (i.paidAmount || 0)), 0);
 
   document.getElementById('statCount').textContent = invoices.length;
