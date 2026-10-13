@@ -21,20 +21,19 @@ let learnedMatches = {};
 let normalizedProducts = [];
 let normalizedProductsSet = new Set();
 let fuse = new Fuse([], { includeScore: true, threshold: 0.28 });
-let loaded = false;
-
 function rebuildProductIndex() {
   normalizedProducts = yourProducts.map(p => normalize(p));
   normalizedProductsSet = new Set(normalizedProducts);
   fuse = new Fuse(normalizedProducts, { includeScore: true, threshold: 0.28 });
 }
 
+// Always re-reads from Supabase (no "loaded once" cache) — a warm serverless instance must see
+// product/learned-match corrections made via another instance, the admin's local machine, or a
+// direct data fix, not just whatever it happened to load on its first request.
 async function ensureLoaded() {
-  if (loaded) return;
   yourProducts = await readJSON('products.json', []);
   learnedMatches = await readJSON('matches.json', {});
   rebuildProductIndex();
-  loaded = true;
 }
 
 // =====================
