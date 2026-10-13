@@ -15,7 +15,7 @@
 
 <main class="wide">
   <h1 class="page-title">Постачальники</h1>
-  <div class="page-sub">Проставте дні тижня замовлення/доставки — у ці дні щоденний Telegram-звіт нагадає замовити в цього постачальника (+ борг, якщо є).</div>
+  <div class="page-sub">Проставте дні тижня замовлення/доставки — у ці дні щоденний Telegram-звіт нагадає замовити в цього постачальника (+ борг, якщо є). "Автопересилка бухгалтеру" — бот приймає накладні від усіх постачальників, але цей чекбокс визначає, кого одразу пересилати бухгалтеру без ручної перевірки адміном.</div>
 
   <div class="form-card">
     <div class="form-grid" style="margin-bottom:10px">
@@ -40,7 +40,7 @@
           <th>Дні замовлення</th>
           <th>Контакт (ім'я, Viber/телефон, сайт)</th>
           <th>Умови</th>
-          <th>Накладні в боті</th>
+          <th>Автопересилка бухгалтеру</th>
         </tr>
       </thead>
       <tbody id="tableBody"></tbody>
@@ -88,7 +88,7 @@ function render() {
       <td style="text-align:center">
         <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text2)">
           <input type="checkbox" class="telegram-allowed-check" data-id="${s.id}" ${s.telegramInvoicesAllowed ? 'checked' : ''}>
-          дозволено
+          пересилати одразу
         </label>
       </td>
     </tr>`;

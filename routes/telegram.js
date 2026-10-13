@@ -35,12 +35,13 @@ async function downloadPhotoBase64(fileId) {
 
 // Fuzzy-ish: exact normalized match first, then substring either direction (OCR'd supplier names
 // rarely match the saved name byte-for-byte — extra legal-entity suffixes, abbreviations, etc).
-function findAllowedSupplier(suppliers, guessName) {
+// Matches against ALL suppliers, not just telegramInvoicesAllowed ones — the server accepts every
+// накладна regardless; that flag only decides who gets notified (see webhook handler below).
+function findSupplier(suppliers, guessName) {
   if (!guessName) return null;
   const key = normalize(guessName);
-  const allowed = suppliers.filter(s => s.telegramInvoicesAllowed);
-  let match = allowed.find(s => normalize(s.name) === key);
-  if (!match) match = allowed.find(s => key.includes(normalize(s.name)) || normalize(s.name).includes(key));
+  let match = suppliers.find(s => normalize(s.name) === key);
+  if (!match) match = suppliers.find(s => key.includes(normalize(s.name)) || normalize(s.name).includes(key));
   return match || null;
 }
 
@@ -76,23 +77,11 @@ router.post('/telegram/webhook', async (req, res) => {
     const result = await recognizeInvoiceImage(base64, 'image/jpeg');
 
     const suppliers = await readJSON('suppliers.json', []);
-    const matchedSupplier = findAllowedSupplier(suppliers, result.supplier);
-
-    if (!matchedSupplier) {
-      await reply(chatId,
-        `⚠️ Постачальника "${result.supplier || 'не розпізнано'}" не підключено для прийому через бота.\n` +
-        `Розпізнано ${result.count} позицій. Передайте накладну адміну вручну.`);
-      const admins = recipients.filter(r => r.role === 'admin' && String(r.chatId) !== chatId);
-      for (const a of admins) {
-        await reply(a.chatId,
-          `⚠️ ${sender.name} надіслав(ла) через бот накладну від постачальника "${result.supplier || '—'}", ` +
-          `якого не підключено (${result.count} позицій). Потрібна ручна обробка.`);
-      }
-      return res.sendStatus(200);
-    }
+    const matchedSupplier = findSupplier(suppliers, result.supplier);
+    const forwardToAccountant = !!(matchedSupplier && matchedSupplier.telegramInvoicesAllowed);
 
     const created = await createInvoice({
-      supplier: matchedSupplier.name,
+      supplier: matchedSupplier ? matchedSupplier.name : (result.supplier || ''),
       date: result.date,
       items: result.items,
       source: 'telegram',
@@ -112,12 +101,18 @@ router.post('/telegram/webhook', async (req, res) => {
       `✅ Накладну додано на перевірку!\nПостачальник: ${inv.supplier}\nДата: ${inv.date}\n` +
       `Сума: ${inv.total.toFixed(2)} ₴${result.warning ? '\n\n⚠️ ' + result.warning : ''}`);
 
-    const others = recipients.filter(r => String(r.chatId) !== chatId);
-    for (const r of others) {
+    // telegramInvoicesAllowed on the matched supplier decides who else gets notified right away:
+    // checked → everyone (incl. бухгалтер); unchecked/unmatched → admins only, for manual triage.
+    const notifyRoles = forwardToAccountant ? null : ['admin'];
+    const toNotify = recipients.filter(r =>
+      String(r.chatId) !== chatId && (!notifyRoles || notifyRoles.includes(r.role)));
+
+    for (const r of toNotify) {
       await reply(r.chatId,
         `🧾 Нова накладна від ${sender.name} (через бот):\n` +
         `Постачальник: ${inv.supplier}\nДата: ${inv.date}\nСума: ${inv.total.toFixed(2)} ₴\n` +
-        `Статус: на перевірці. Перевірте на сайті в розділі "Накладні".`);
+        `Статус: на перевірці.${forwardToAccountant ? '' : ' Постачальника не позначено для автопересилки — перевірте вручну.'}\n` +
+        `Перевірте на сайті в розділі "Накладні".`);
     }
 
     res.sendStatus(200);
