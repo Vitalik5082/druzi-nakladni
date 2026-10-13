@@ -135,7 +135,7 @@ async function suggestSupplier(items) {
 const INVOICE_PROMPT = `Extract invoice data from this Ukrainian invoice (накладна) image.
 Return ONLY a valid JSON object, no markdown, no explanation.
 Format: {
-  "supplier": "supplier/vendor name as printed on the invoice letterhead, or empty string if not visible",
+  "supplier": "supplier/vendor name as printed on the invoice letterhead (see supplier-identification rules below), or empty string if not visible",
   "date": "invoice date in YYYY-MM-DD format, or empty string if not visible",
   "invoiceTotal": number (the printed grand total of the invoice, "Всього"/"Разом"/"Сума", without VAT if that's what's printed; 0 if not visible),
   "items": [ { "name": "product name", "qty": number, "unit": "kg|g|pcs|l|ml", "price": number } ]
@@ -159,7 +159,10 @@ CRITICAL — for "шт" products WITH weight/volume in the name, keep unit as "p
 CRITICAL — for qty, use this priority:
 1. "Вага ч" / "Нетто" / "Net" column if exists → use that
 2. "Кількість" / "К-сть" column
-3. "Брутто" only if no net column exists`;
+3. "Брутто" only if no net column exists
+
+Rules for identifying the supplier when there's no clear letterhead/company name printed:
+- If the document contains the phrase "Бланк Замовлення" anywhere, the supplier is "Кока-Кола"`;
 
 // Shared by the website's /upload AND the Telegram bot — one OCR+classification pipeline.
 async function recognizeInvoiceImage(imageBase64, mimeType) {
