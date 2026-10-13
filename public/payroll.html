@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ЗП</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="header-root"></div>
+<script src="auth.js"></script>
+<script src="nav.js"></script>
+<script src="dateutil.js"></script>
+<script>renderNav('payroll'); requireAuth();</script>
+
+<main class="wide">
+  <h1 class="page-title">Заробітна плата</h1>
+  <div class="page-sub">Виплати працівникам. Для працівників "% від каси" — розрахунок підтягується з каси за вибраний період.</div>
+
+  <div class="form-card">
+    <div class="form-grid">
+      <div class="form-field">
+        <label for="payEmployee">Працівник</label>
+        <select id="payEmployee"></select>
+      </div>
+      <div class="form-field">
+        <label for="payType">Тип</label>
+        <select id="payType">
+          <option value="salary">Зарплата</option>
+          <option value="advance">Аванс</option>
+          <option value="bonus">Премія</option>
+          <option value="fine">Штраф</option>
+        </select>
+      </div>
+      <div class="form-field">
+        <label for="payDate">Дата</label>
+        <input id="payDate" type="date">
+      </div>
+      <div class="form-field">
+        <label for="payAmount">Сума (₴)</label>
+        <input id="payAmount" type="number" step="any">
+      </div>
+      <div class="form-field">
+        <label for="payNote">Примітка</label>
+        <input id="payNote" placeholder="опційно">
+      </div>
+    </div>
+
+    <!-- percent-based suggestion -->
+    <div id="suggestBox" style="display:none;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px">
+      <div class="form-grid" style="margin-bottom:10px">
+        <div class="form-field">
+          <label for="suggestFrom">Період від</label>
+          <input id="suggestFrom" type="date">
+        </div>
+        <div class="form-field">
+          <label for="suggestTo">Період до</label>
+          <input id="suggestTo" type="date">
+        </div>
+      </div>
+      <button class="btn" id="calcSuggestBtn" type="button">Розрахувати з каси</button>
+      <div id="suggestResult" style="margin-top:10px;font-size:12px;color:var(--text2)"></div>
+    </div>
+
+    <button class="btn primary" id="savePayBtn">Зберегти виплату</button>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Дата</th>
+          <th>Працівник</th>
+          <th>Тип</th>
+          <th style="text-align:right">Сума</th>
+          <th>Примітка</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let employees = [];
+
+const TYPE_LABELS = { salary: 'Зарплата', advance: 'Аванс', bonus: 'Премія', fine: 'Штраф' };
+
+async function loadEmployees() {
+  const res = await authFetch('/api/employees');
+  employees = await res.json();
+  const select = document.getElementById('payEmployee');
+  select.innerHTML = employees.map(e => `<option value="${e.id}">${escHtml(e.name)}</option>`).join('');
+  toggleSuggestBox();
+}
+
+function toggleSuggestBox() {
+  const empId = Number(document.getElementById('payEmployee').value);
+  const emp = employees.find(e => e.id === empId);
+  document.getElementById('suggestBox').style.display =
+    emp && emp.payType === 'percent_of_revenue' ? 'block' : 'none';
+}
+
+document.getElementById('payEmployee').addEventListener('change', toggleSuggestBox);
+
+document.getElementById('calcSuggestBtn').addEventListener('click', async () => {
+  const empId = document.getElementById('payEmployee').value;
+  const from = document.getElementById('suggestFrom').value;
+  const to = document.getElementById('suggestTo').value;
+  if (!from || !to) { showToast('Вкажи період', 'error'); return; }
+
+  try {
+    const res = await authFetch(`/api/payroll/suggest?employeeId=${empId}&from=${from}&to=${to}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    document.getElementById('suggestResult').innerHTML =
+      `Виручка за період: <b>${data.revenue.toFixed(2)} ₴</b> × ${data.percent}% = <b>${data.amount.toFixed(2)} ₴</b> (${data.days} дн. каси)`;
+    document.getElementById('payAmount').value = data.amount;
+  } catch (err) {
+    showToast(err.message || 'Помилка розрахунку', 'error');
+  }
+});
+
+async function loadPayroll() {
+  const res = await authFetch('/api/payroll');
+  const entries = await res.json();
+  const tbody = document.getElementById('tableBody');
+
+  if (!entries.length) {
+    tbody.innerHTML = `<tr><td colspan="6"><div class="empty">
+      <div class="empty-icon">💵</div>
+      <div class="empty-title">Ще немає виплат</div></div></td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = entries.map(p => `
+    <tr>
+      <td>${p.date}</td>
+      <td>${escHtml(p.employeeName)}</td>
+      <td><span class="unit-badge">${TYPE_LABELS[p.type] || p.type}</span></td>
+      <td style="text-align:right" class="total-cell">${p.amount.toFixed(2)} ₴</td>
+      <td>${escHtml(p.note || '—')}</td>
+      <td><button class="btn sm danger" onclick="deletePayroll(${p.id})">✕</button></td>
+    </tr>
+  `).join('');
+}
+
+document.getElementById('savePayBtn').addEventListener('click', async () => {
+  const employeeId = document.getElementById('payEmployee').value;
+  const type = document.getElementById('payType').value;
+  const date = document.getElementById('payDate').value;
+  const amount = document.getElementById('payAmount').value;
+  const note = document.getElementById('payNote').value.trim();
+
+  if (!employeeId) { showToast('Додай працівника на сторінці "Працівники"', 'error'); return; }
+  if (!date) { showToast('Вкажи дату', 'error'); return; }
+  if (amount === '' || isNaN(Number(amount))) { showToast('Вкажи суму', 'error'); return; }
+
+  try {
+    const res = await authFetch('/api/payroll', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ employeeId, type, date, amount, note })
+    });
+    if (!res.ok) throw new Error();
+    showToast('✓ Виплату збережено', 'success');
+    document.getElementById('payAmount').value = '';
+    document.getElementById('payNote').value = '';
+    document.getElementById('suggestResult').innerHTML = '';
+    loadPayroll();
+  } catch {
+    showToast('Помилка збереження', 'error');
+  }
+});
+
+async function deletePayroll(id) {
+  if (!confirm('Видалити цю виплату?')) return;
+  try {
+    const res = await authFetch(`/api/payroll/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error();
+    loadPayroll();
+  } catch {
+    showToast('Помилка видалення', 'error');
+  }
+}
+
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function showToast(msg, type = '') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `toast ${type} show`;
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+document.getElementById('payDate').value = todayStr();
+loadEmployees();
+loadPayroll();
+</script>
+</body>
+</html>

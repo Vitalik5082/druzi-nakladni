@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ревізії</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="header-root"></div>
+<script src="auth.js"></script>
+<script src="nav.js"></script>
+<script src="dateutil.js"></script>
+<script>renderNav('revisions'); requireAuth();</script>
+
+<main class="wide">
+  <h1 class="page-title">Ревізії</h1>
+  <div class="page-sub">Список інгредієнтів уже підтягнутий з Poster — впиши тільки фактичну кількість. Теоретична і ціна підтягнуті автоматично, можна виправити вручну.</div>
+
+  <div class="form-card">
+    <div class="form-grid" style="margin-bottom:10px">
+      <div class="form-field">
+        <label for="revDate">Дата ревізії</label>
+        <input id="revDate" type="date">
+      </div>
+      <div class="form-field">
+        <label for="revNote">Примітка</label>
+        <input id="revNote" placeholder="опційно">
+      </div>
+      <div class="form-field">
+        <label for="searchInput">Пошук інгредієнта</label>
+        <input id="searchInput" placeholder="почни вводити назву...">
+      </div>
+    </div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:10px" id="hint">
+      Заповнюй "Фактична" лише для того, що рахуєш — порожні рядки в ревізію не підуть.
+      <span style="color:var(--warn)">Теоретична зі знаком "?" — орієнтовна, бо постачання в Poster не ведуться послідовно.</span>
+    </div>
+
+    <div class="table-wrap" style="margin-bottom:12px">
+      <table>
+        <thead>
+          <tr>
+            <th>Інгредієнт</th>
+            <th style="text-align:right">Теоретична</th>
+            <th style="text-align:right">Фактична</th>
+            <th style="text-align:right">Ціна за од.</th>
+            <th>Од.</th>
+          </tr>
+        </thead>
+        <tbody id="rowsBody"></tbody>
+      </table>
+    </div>
+
+    <button class="btn" id="addCustomRowBtn" type="button">+ Додати позицію вручну (не з Poster)</button>
+    <button class="btn primary" id="saveRevBtn" type="button">Зберегти ревізію</button>
+  </div>
+
+  <h1 class="page-title" style="font-size:14px">Історія ревізій</h1>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Дата</th>
+          <th>Позицій</th>
+          <th style="text-align:right">Втрати/надлишки (₴)</th>
+          <th>Примітка</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="historyBody"></tbody>
+    </table>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let ingredients = [];
+let customRowCount = 0;
+
+async function loadIngredients() {
+  try {
+    const res = await authFetch('/api/poster/ingredients');
+    ingredients = await res.json();
+  } catch { ingredients = []; }
+  renderRows();
+}
+
+function renderRows() {
+  const q = document.getElementById('searchInput').value.toLowerCase();
+  const tbody = document.getElementById('rowsBody');
+
+  if (!ingredients.length) {
+    tbody.innerHTML = `<tr><td colspan="5"><div class="empty">
+      <div class="empty-icon">📦</div>
+      <div class="empty-title">Немає синхронізованих інгредієнтів</div>
+      <div>Синхронізуй їх на сторінці "Залишки" або "Техкарти"</div></div></td></tr>`;
+    return;
+  }
+
+  const filtered = ingredients.filter(i => i.name.toLowerCase().includes(q));
+  // preserve any already-typed "actual" values when re-rendering after search
+  const existingActuals = {};
+  tbody.querySelectorAll('tr[data-ing-id]').forEach(tr => {
+    const input = tr.querySelector('.act-input');
+    if (input && input.value !== '') existingActuals[tr.dataset.ingId] = input.value;
+  });
+
+  tbody.innerHTML = filtered.map(i => {
+    const theoretical = Number(i.left) || 0;
+    const price = Number(i.prime_cost) || 0;
+    const uncertain = theoretical < 0 || theoretical === 0;
+    const prevActual = existingActuals[i.ingredient_id] || '';
+    return `
+    <tr data-ing-id="${i.ingredient_id}">
+      <td>${escHtml(i.name)}</td>
+      <td style="text-align:right">
+        <input class="qty-input theo-input" type="number" step="any" value="${theoretical.toFixed(3)}">
+        ${uncertain ? '<span style="color:var(--warn)" title="Орієнтовно — постачання в Poster не ведуться послідовно">?</span>' : ''}
+      </td>
+      <td style="text-align:right"><input class="qty-input act-input" type="number" step="any" placeholder="—" value="${escHtml(prevActual)}"></td>
+      <td style="text-align:right"><input class="price-input price-input-field" type="number" step="any" value="${price.toFixed(2)}"></td>
+      <td><span class="unit-badge">${escHtml(i.unit)}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+document.getElementById('searchInput').addEventListener('input', renderRows);
+
+document.getElementById('addCustomRowBtn').addEventListener('click', () => {
+  const id = `custom-${customRowCount++}`;
+  const tbody = document.getElementById('rowsBody');
+  const tr = document.createElement('tr');
+  tr.dataset.ingId = id;
+  tr.classList.add('custom-row');
+  tr.innerHTML = `
+    <td><input class="qty-input" style="width:100%;text-align:left" placeholder="назва товару" class="name-input"></td>
+    <td><input class="qty-input theo-input" type="number" step="any" value="0"></td>
+    <td><input class="qty-input act-input" type="number" step="any" placeholder="—"></td>
+    <td><input class="price-input price-input-field" type="number" step="any" value="0"></td>
+    <td><button class="btn sm danger" onclick="this.closest('tr').remove()">✕</button></td>
+  `;
+  tbody.appendChild(tr);
+});
+
+document.getElementById('saveRevBtn').addEventListener('click', async () => {
+  const date = document.getElementById('revDate').value;
+  const note = document.getElementById('revNote').value.trim();
+  if (!date) { showToast('Вкажи дату', 'error'); return; }
+
+  const items = [];
+  document.querySelectorAll('#rowsBody tr').forEach(tr => {
+    const actInput = tr.querySelector('.act-input');
+    if (!actInput || actInput.value === '') return; // skip uncounted rows
+
+    const isCustom = tr.classList.contains('custom-row');
+    const name = isCustom
+      ? tr.querySelector('.name-input').value.trim()
+      : tr.children[0].textContent.trim();
+    if (!name) return;
+
+    items.push({
+      name,
+      theoretical: tr.querySelector('.theo-input').value,
+      actual: actInput.value,
+      unitPrice: tr.querySelector('.price-input-field').value
+    });
+  });
+
+  if (!items.length) { showToast('Впиши фактичну кількість хоча б для одної позиції', 'error'); return; }
+
+  try {
+    const res = await authFetch('/api/revisions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, note, items })
+    });
+    if (!res.ok) throw new Error();
+    showToast(`✓ Ревізію збережено (${items.length} позицій)`, 'success');
+    document.getElementById('revNote').value = '';
+    document.querySelectorAll('.act-input').forEach(i => i.value = '');
+    document.querySelectorAll('.custom-row').forEach(tr => tr.remove());
+    loadHistory();
+  } catch {
+    showToast('Помилка збереження', 'error');
+  }
+});
+
+async function loadHistory() {
+  const res = await authFetch('/api/revisions');
+  const revisions = await res.json();
+  const tbody = document.getElementById('historyBody');
+
+  if (!revisions.length) {
+    tbody.innerHTML = `<tr><td colspan="5"><div class="empty">
+      <div class="empty-icon">🔍</div>
+      <div class="empty-title">Ще немає ревізій</div></div></td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = revisions.map(r => `
+    <tr>
+      <td>${r.date}</td>
+      <td>${r.items.length}</td>
+      <td style="text-align:right;color:${r.totalLossValue < 0 ? 'var(--danger)' : 'var(--accent)'}">${r.totalLossValue.toFixed(2)} ₴</td>
+      <td>${escHtml(r.note || '—')}</td>
+      <td><button class="btn sm danger" onclick="deleteRevision(${r.id})">✕</button></td>
+    </tr>
+  `).join('');
+}
+
+async function deleteRevision(id) {
+  if (!confirm('Видалити цю ревізію?')) return;
+  try {
+    const res = await authFetch(`/api/revisions/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error();
+    loadHistory();
+  } catch {
+    showToast('Помилка видалення', 'error');
+  }
+}
+
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function showToast(msg, type = '') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `toast ${type} show`;
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+document.getElementById('revDate').value = todayStr();
+loadIngredients();
+loadHistory();
+</script>
+</body>
+</html>

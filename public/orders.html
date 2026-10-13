@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Рекомендації замовлень</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="header-root"></div>
+<script src="auth.js"></script>
+<script src="nav.js"></script>
+<script>renderNav('orders'); requireAuth();</script>
+
+<main class="wide">
+  <h1 class="page-title">Рекомендації замовлень</h1>
+  <div class="page-sub">
+    Коли залишок у Poster мінусовий (постачання ведуться непослідовно) — рахуємо не від залишку, а від середньотижневої витрати з продажів +10%.
+    <a href="product-suppliers.html" style="color:var(--accent)">Призначити постачальників →</a>
+  </div>
+
+  <div class="form-card">
+    <button class="btn primary" id="refreshBtn">↻ Оновити</button>
+  </div>
+
+  <div id="groupsWrap"></div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+async function load() {
+  const wrap = document.getElementById('groupsWrap');
+  wrap.innerHTML = `<div class="empty"><div class="spinner" style="margin:0 auto"></div></div>`;
+
+  try {
+    const res = await authFetch('/api/poster/order-recommendations');
+    const data = await res.json();
+    render(data.items);
+  } catch {
+    wrap.innerHTML = `<div class="empty"><div class="empty-title">Помилка завантаження</div></div>`;
+  }
+}
+
+function render(items) {
+  const wrap = document.getElementById('groupsWrap');
+  if (!items.length) {
+    wrap.innerHTML = `<div class="empty">
+      <div class="empty-icon">📋</div>
+      <div class="empty-title">Немає рекомендацій</div>
+      <div>Синхронізуй продажі (Реалізація), техкарти і залишки (Залишки)</div></div>`;
+    return;
+  }
+
+  const groups = {};
+  items.forEach(i => {
+    const key = i.supplierName || '— без призначеного постачальника —';
+    (groups[key] = groups[key] || []).push(i);
+  });
+
+  const groupNames = Object.keys(groups).sort((a, b) => {
+    if (a.startsWith('—')) return 1;
+    if (b.startsWith('—')) return -1;
+    return a.localeCompare(b);
+  });
+
+  wrap.innerHTML = groupNames.map(name => `
+    <div class="table-wrap" style="margin-bottom:16px">
+      <table>
+        <thead>
+          <tr>
+            <th colspan="5" style="background:var(--bg3);font-size:12px;color:var(--accent)">${escHtml(name)} (${groups[name].length})</th>
+          </tr>
+          <tr>
+            <th>Інгредієнт</th>
+            <th style="text-align:right">Залишок</th>
+            <th style="text-align:right">Серед./тиждень</th>
+            <th style="text-align:right">Рекомендовано замовити</th>
+            <th>Нотатка</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${groups[name].map(i => `
+            <tr>
+              <td>${escHtml(i.name)} <span class="unit-badge">${escHtml(i.unit)}</span></td>
+              <td style="text-align:right">
+                ${i.leftover.toFixed(2)}
+                ${!i.reliable ? '<span style="color:var(--warn)" title="Залишок у Poster не ведеться коректно — рекомендація рахується з продажів">?</span>' : ''}
+              </td>
+              <td style="text-align:right">${i.avgWeekly.toFixed(2)}</td>
+              <td style="text-align:right" class="total-cell" style="color:var(--accent)">${i.recommendedQty.toFixed(2)} ${escHtml(i.unit)}</td>
+              <td style="color:var(--text3);font-size:11px">${escHtml(i.note || '')}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `).join('');
+}
+
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function showToast(msg, type = '') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `toast ${type} show`;
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+document.getElementById('refreshBtn').addEventListener('click', load);
+load();
+</script>
+</body>
+</html>

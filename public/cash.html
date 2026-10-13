@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Каса</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="header-root"></div>
+<script src="auth.js"></script>
+<script src="nav.js"></script>
+<script src="dateutil.js"></script>
+<script>renderNav('cash'); requireAuth();</script>
+
+<main>
+  <h1 class="page-title">Каса</h1>
+  <div class="page-sub">Виручка підтягується з Poster автоматично. Можна виправити вручну — такий день позначається "!"</div>
+
+  <div class="form-card">
+    <div class="form-grid">
+      <div class="form-field">
+        <label for="fromDate">Від</label>
+        <input id="fromDate" type="date">
+      </div>
+      <div class="form-field">
+        <label for="toDate">До</label>
+        <input id="toDate" type="date">
+      </div>
+    </div>
+    <button class="btn primary" id="loadBtn">Показати</button>
+    <button class="btn" id="syncBtn">↻ Синхронізувати з Poster</button>
+    <span id="syncStatus" style="font-size:11px;color:var(--text3);margin-left:8px"></span>
+  </div>
+
+  <div class="stats-row" style="grid-template-columns:repeat(2,1fr)">
+    <div class="stat-card">
+      <div class="stat-label">Днів</div>
+      <div class="stat-value info" id="statDays">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Разом за період</div>
+      <div class="stat-value green" id="statTotal">0 ₴</div>
+    </div>
+  </div>
+
+  <div class="form-card">
+    <div class="results-title" style="margin-bottom:10px">Виправити/додати день вручну</div>
+    <div class="form-grid">
+      <div class="form-field">
+        <label for="cashDate">Дата</label>
+        <input id="cashDate" type="date">
+      </div>
+      <div class="form-field">
+        <label for="cashRevenue">Виручка за день (₴)</label>
+        <input id="cashRevenue" type="number" step="any" placeholder="25000">
+      </div>
+      <div class="form-field">
+        <label for="cashNote">Примітка</label>
+        <input id="cashNote" placeholder="напр. причина виправлення">
+      </div>
+    </div>
+    <button class="btn primary" id="saveCashBtn">Зберегти день</button>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Дата</th>
+          <th style="text-align:right">Виручка</th>
+          <th>Джерело</th>
+          <th>Примітка</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+async function loadDays() {
+  const from = document.getElementById('fromDate').value;
+  const to = document.getElementById('toDate').value;
+  const params = new URLSearchParams();
+  if (from) params.set('from', from);
+  if (to) params.set('to', to);
+
+  const res = await authFetch('/api/cash-days?' + params.toString());
+  const days = await res.json();
+  const tbody = document.getElementById('tableBody');
+
+  document.getElementById('statDays').textContent = days.length;
+  document.getElementById('statTotal').textContent = days.reduce((s, d) => s + d.revenue, 0).toFixed(2) + ' ₴';
+
+  if (!days.length) {
+    tbody.innerHTML = `<tr><td colspan="5"><div class="empty">
+      <div class="empty-icon">🧾</div>
+      <div class="empty-title">Ще немає записів каси</div>
+      <div>Натисни "Синхронізувати з Poster"</div></div></td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = days.map(d => `
+    <tr>
+      <td>${d.date}</td>
+      <td style="text-align:right" class="total-cell">${d.revenue.toFixed(2)} ₴
+        ${d.edited ? '<span style="color:var(--warn)" title="Відредаговано вручну">!</span>' : ''}
+      </td>
+      <td><span class="unit-badge ${d.source === 'manual' ? '' : 'g'}">${d.source === 'manual' ? 'вручну' : 'Poster'}</span></td>
+      <td>${escHtml(d.note || '—')}</td>
+      <td><button class="btn sm danger" onclick="deleteDay(${d.id})">✕</button></td>
+    </tr>
+  `).join('');
+}
+
+document.getElementById('syncBtn').addEventListener('click', async () => {
+  const from = document.getElementById('fromDate').value;
+  const to = document.getElementById('toDate').value;
+  if (!from || !to) { showToast('Вкажи період', 'error'); return; }
+
+  document.getElementById('syncStatus').textContent = 'Синхронізація...';
+  try {
+    const res = await authFetch('/api/poster/sync-cash', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, to })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    document.getElementById('syncStatus').textContent = '';
+    let msg = `✓ Оновлено ${data.updated} дн.`;
+    if (data.skippedEdited) msg += `, збережено ${data.skippedEdited} відредагованих вручну`;
+    showToast(msg, 'success');
+    loadDays();
+  } catch (err) {
+    document.getElementById('syncStatus').textContent = '';
+    showToast(err.message || 'Помилка синхронізації', 'error');
+  }
+});
+
+document.getElementById('saveCashBtn').addEventListener('click', async () => {
+  const date = document.getElementById('cashDate').value;
+  const revenue = document.getElementById('cashRevenue').value;
+  const note = document.getElementById('cashNote').value.trim();
+
+  if (!date) { showToast('Вкажи дату', 'error'); return; }
+  if (revenue === '' || isNaN(Number(revenue))) { showToast('Вкажи виручку', 'error'); return; }
+
+  try {
+    const res = await authFetch('/api/cash-days', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, revenue, note })
+    });
+    if (!res.ok) throw new Error();
+    showToast('✓ Збережено (позначено як відредаговано вручну)', 'success');
+    document.getElementById('cashRevenue').value = '';
+    document.getElementById('cashNote').value = '';
+    loadDays();
+  } catch {
+    showToast('Помилка збереження', 'error');
+  }
+});
+
+async function deleteDay(id) {
+  if (!confirm('Видалити запис каси за цей день?')) return;
+  try {
+    const res = await authFetch(`/api/cash-days/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error();
+    loadDays();
+  } catch {
+    showToast('Помилка видалення', 'error');
+  }
+}
+
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function showToast(msg, type = '') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `toast ${type} show`;
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+document.getElementById('loadBtn').addEventListener('click', loadDays);
+document.getElementById('cashDate').value = todayStr();
+
+const today = new Date();
+const first = new Date(today.getFullYear(), today.getMonth(), 1);
+document.getElementById('fromDate').value = localDateStr(first);
+document.getElementById('toDate').value = todayStr();
+loadDays();
+</script>
+</body>
+</html>

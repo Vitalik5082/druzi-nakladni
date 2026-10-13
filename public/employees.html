@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Працівники</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="header-root"></div>
+<script src="auth.js"></script>
+<script src="nav.js"></script>
+<script>renderNav('employees'); requireAuth();</script>
+
+<main>
+  <h1 class="page-title">Працівники</h1>
+  <div class="page-sub">Довідник працівників — для нарахування ЗП на сторінці "ЗП"</div>
+
+  <div class="form-card">
+    <div class="form-grid">
+      <div class="form-field">
+        <label for="empName">Ім'я</label>
+        <input id="empName" placeholder="Іван Петренко">
+      </div>
+      <div class="form-field">
+        <label for="empRole">Роль</label>
+        <input id="empRole" placeholder="бармен / адміністратор / кухар">
+      </div>
+      <div class="form-field">
+        <label for="empPayType">Тип оплати</label>
+        <select id="empPayType">
+          <option value="manual">Фіксована сума (вручну)</option>
+          <option value="percent_of_revenue">% від каси</option>
+        </select>
+      </div>
+      <div class="form-field" id="empPercentField" style="display:none">
+        <label for="empPercent">Відсоток (%)</label>
+        <input id="empPercent" type="number" step="any" placeholder="1.5">
+      </div>
+    </div>
+    <button class="btn primary" id="saveEmpBtn">Додати працівника</button>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Ім'я</th>
+          <th>Роль</th>
+          <th>Тип оплати</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+document.getElementById('empPayType').addEventListener('change', e => {
+  document.getElementById('empPercentField').style.display =
+    e.target.value === 'percent_of_revenue' ? 'flex' : 'none';
+});
+
+async function loadEmployees() {
+  const res = await authFetch('/api/employees');
+  const employees = await res.json();
+  const tbody = document.getElementById('tableBody');
+
+  if (!employees.length) {
+    tbody.innerHTML = `<tr><td colspan="4"><div class="empty">
+      <div class="empty-icon">👷</div>
+      <div class="empty-title">Ще немає працівників</div></div></td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = employees.map(e => `
+    <tr>
+      <td>${escHtml(e.name)}</td>
+      <td>${escHtml(e.role || '—')}</td>
+      <td>${e.payType === 'percent_of_revenue' ? `${e.percent}% від каси` : 'Вручну'}</td>
+      <td><button class="btn sm danger" onclick="deleteEmployee(${e.id})">✕</button></td>
+    </tr>
+  `).join('');
+}
+
+document.getElementById('saveEmpBtn').addEventListener('click', async () => {
+  const name = document.getElementById('empName').value.trim();
+  const role = document.getElementById('empRole').value.trim();
+  const payType = document.getElementById('empPayType').value;
+  const percent = document.getElementById('empPercent').value;
+
+  if (!name) { showToast('Вкажи ім\'я', 'error'); return; }
+  if (payType === 'percent_of_revenue' && (percent === '' || isNaN(Number(percent)))) {
+    showToast('Вкажи відсоток', 'error'); return;
+  }
+
+  try {
+    const res = await authFetch('/api/employees', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, role, payType, percent })
+    });
+    if (!res.ok) throw new Error();
+    showToast('✓ Працівника додано', 'success');
+    document.getElementById('empName').value = '';
+    document.getElementById('empRole').value = '';
+    document.getElementById('empPercent').value = '';
+    loadEmployees();
+  } catch {
+    showToast('Помилка збереження', 'error');
+  }
+});
+
+async function deleteEmployee(id) {
+  if (!confirm('Видалити цього працівника?')) return;
+  try {
+    const res = await authFetch(`/api/employees/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error();
+    loadEmployees();
+  } catch {
+    showToast('Помилка видалення', 'error');
+  }
+}
+
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function showToast(msg, type = '') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `toast ${type} show`;
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+loadEmployees();
+</script>
+</body>
+</html>

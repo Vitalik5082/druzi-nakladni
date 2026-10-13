@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Залишки</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="header-root"></div>
+<script src="auth.js"></script>
+<script src="nav.js"></script>
+<script>renderNav('leftovers'); requireAuth();</script>
+
+<main class="wide">
+  <h1 class="page-title">Залишки</h1>
+  <div class="page-sub">Поточні залишки інгредієнтів — завжди live-запит до Poster (не кешується)</div>
+
+  <div class="form-card">
+    <button class="btn primary" id="refreshBtn">↻ Оновити залишки</button>
+    <input class="modal-search" id="searchInput" placeholder="Пошук інгредієнта..." style="display:inline-block;width:260px;margin:0 0 0 10px;vertical-align:middle">
+  </div>
+
+  <div class="table-wrap" id="leftoversWrap"></div>
+
+  <!-- CONSUMPTION WINDOW -->
+  <div style="margin-top:36px">
+    <div class="results-header">
+      <div>
+        <div class="results-title">Витрата інгредієнтів за останні 7 днів</div>
+        <div class="results-meta">Рахується з продажів (Poster) × склад техкарти — не окремий запит, а наша формула</div>
+      </div>
+      <button class="btn" id="consumptionBtn">↻ Перерахувати</button>
+    </div>
+    <div class="table-wrap" id="consumptionWrap"></div>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let leftovers = [];
+
+async function loadLeftovers() {
+  document.getElementById('leftoversWrap').innerHTML = `<div class="empty"><div class="spinner" style="margin:0 auto"></div></div>`;
+  try {
+    const res = await authFetch('/api/poster/leftovers');
+    leftovers = await res.json();
+    renderLeftovers();
+  } catch {
+    document.getElementById('leftoversWrap').innerHTML = `<div class="empty"><div class="empty-title">Помилка завантаження</div></div>`;
+  }
+}
+
+function renderLeftovers() {
+  const q = document.getElementById('searchInput').value.toLowerCase();
+  const filtered = leftovers.filter(i => (i.ingredient_name || '').toLowerCase().includes(q));
+  const wrap = document.getElementById('leftoversWrap');
+
+  if (!filtered.length) {
+    wrap.innerHTML = `<div class="empty"><div class="empty-icon">📦</div><div class="empty-title">Немає даних</div></div>`;
+    return;
+  }
+
+  wrap.innerHTML = `<table>
+    <thead><tr><th>Інгредієнт</th><th style="text-align:right">Залишок</th><th>Од.</th></tr></thead>
+    <tbody>
+      ${filtered.map(i => {
+        const left = Number(i.ingredient_left);
+        const cls = left < 0 ? 'danger' : '';
+        return `<tr>
+          <td>${escHtml(i.ingredient_name)}</td>
+          <td style="text-align:right" class="${cls}">${left.toFixed(2)}</td>
+          <td><span class="unit-badge">${i.ingredient_unit}</span></td>
+        </tr>`;
+      }).join('')}
+    </tbody>
+  </table>`;
+}
+
+document.getElementById('searchInput').addEventListener('input', renderLeftovers);
+document.getElementById('refreshBtn').addEventListener('click', loadLeftovers);
+
+async function loadConsumption() {
+  const wrap = document.getElementById('consumptionWrap');
+  wrap.innerHTML = `<div class="empty"><div class="spinner" style="margin:0 auto"></div></div>`;
+  try {
+    const res = await authFetch('/api/poster/consumption?days=7');
+    const data = await res.json();
+
+    if (!data.items.length) {
+      wrap.innerHTML = `<div class="empty"><div class="empty-icon">📉</div><div class="empty-title">Немає даних</div>
+        <div>Синхронізуй продажі (сторінка "Реалізація") і техкарти (сторінка "Техкарти")</div></div>`;
+      return;
+    }
+
+    wrap.innerHTML = `<table>
+      <thead><tr><th>Інгредієнт</th><th style="text-align:right">Витрачено</th><th>Од.</th></tr></thead>
+      <tbody>
+        ${data.items.map(i => `
+          <tr>
+            <td>${escHtml(i.name)}</td>
+            <td style="text-align:right" class="total-cell">${i.amount.toFixed(2)}</td>
+            <td><span class="unit-badge">${i.unit}</span></td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>`;
+  } catch {
+    wrap.innerHTML = `<div class="empty"><div class="empty-title">Помилка завантаження</div></div>`;
+  }
+}
+
+document.getElementById('consumptionBtn').addEventListener('click', loadConsumption);
+
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function showToast(msg, type = '') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `toast ${type} show`;
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+loadLeftovers();
+loadConsumption();
+</script>
+</body>
+</html>

@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Прибуток</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="header-root"></div>
+<script src="auth.js"></script>
+<script src="nav.js"></script>
+<script src="dateutil.js"></script>
+<script>renderNav('dashboard'); requireAuth();</script>
+
+<main>
+  <h1 class="page-title">Прибуток</h1>
+  <div class="page-sub">Виручка мінус товари, інші витрати та ЗП за вибраний період</div>
+
+  <div class="form-card">
+    <div class="form-grid">
+      <div class="form-field">
+        <label>Період</label>
+        <select id="periodPreset">
+          <option value="today">Сьогодні</option>
+          <option value="week">Цей тиждень</option>
+          <option value="month" selected>Цей місяць</option>
+          <option value="custom">Довільний</option>
+        </select>
+      </div>
+      <div class="form-field">
+        <label for="fromDate">Від</label>
+        <input id="fromDate" type="date">
+      </div>
+      <div class="form-field">
+        <label for="toDate">До</label>
+        <input id="toDate" type="date">
+      </div>
+    </div>
+    <button class="btn primary" id="loadBtn">Показати</button>
+    <button class="btn" id="syncFinanceBtn">↻ Синхронізувати ЗП з Poster</button>
+    <span id="syncStatus" style="font-size:11px;color:var(--text3);margin-left:8px"></span>
+  </div>
+
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-label">Виручка (каса)</div>
+      <div class="stat-value green" id="statRevenue">0 ₴</div>
+      <div class="stat-note" id="noteRevenue"></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Товари (накладні)</div>
+      <div class="stat-value info" id="statGoods">0 ₴</div>
+      <div class="stat-note" id="noteGoods"></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Інші витрати</div>
+      <div class="stat-value warn" id="statExpenses">0 ₴</div>
+      <div class="stat-note" id="noteExpenses"></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">ЗП</div>
+      <div class="stat-value warn" id="statPayroll">0 ₴</div>
+      <div class="stat-note" id="notePayroll"></div>
+    </div>
+  </div>
+
+  <div class="stats-row" style="grid-template-columns:repeat(2,1fr)">
+    <div class="stat-card">
+      <div class="stat-label">Чистий прибуток</div>
+      <div class="stat-value" id="statProfit" style="font-size:24px">0 ₴</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Фудкост %</div>
+      <div class="stat-value" id="statFoodcost" style="font-size:24px">—</div>
+      <div class="stat-note">Орієнтовно: товари / виручка. Точний фудкост потребує техкарт з Poster.</div>
+    </div>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+function fmt(n) { return (n || 0).toFixed(2) + ' ₴'; }
+
+function applyPreset(preset) {
+  const today = new Date();
+  const fmtD = localDateStr;
+  let from, to;
+
+  if (preset === 'today') {
+    from = to = fmtD(today);
+  } else if (preset === 'week') {
+    const day = today.getDay() || 7;
+    const monday = new Date(today);
+    monday.setDate(today.getDate() - day + 1);
+    from = fmtD(monday);
+    to = fmtD(today);
+  } else if (preset === 'month') {
+    const first = new Date(today.getFullYear(), today.getMonth(), 1);
+    from = fmtD(first);
+    to = fmtD(today);
+  } else {
+    return;
+  }
+  document.getElementById('fromDate').value = from;
+  document.getElementById('toDate').value = to;
+}
+
+document.getElementById('periodPreset').addEventListener('change', e => {
+  if (e.target.value !== 'custom') applyPreset(e.target.value);
+});
+
+async function loadDashboard() {
+  const from = document.getElementById('fromDate').value;
+  const to = document.getElementById('toDate').value;
+  if (!from || !to) { showToast('Вкажи період', 'error'); return; }
+
+  try {
+    const res = await authFetch(`/api/dashboard?from=${from}&to=${to}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    document.getElementById('statRevenue').textContent = fmt(data.revenue);
+    document.getElementById('noteRevenue').textContent = `${data.cashDaysCount} дн. каси`;
+
+    document.getElementById('statGoods').textContent = fmt(data.goods);
+    document.getElementById('noteGoods').textContent = `${data.invoicesCount} накладних`;
+
+    document.getElementById('statExpenses').textContent = fmt(data.otherExpenses);
+    document.getElementById('noteExpenses').textContent = `${data.expensesCount} записів`;
+
+    document.getElementById('statPayroll').textContent = fmt(data.payroll);
+    document.getElementById('notePayroll').textContent =
+      `${data.payrollEntriesCount} виплат вручну (${fmt(data.payrollManual)}) + з Poster ${fmt(data.payrollFromPoster)}`;
+
+    const profitEl = document.getElementById('statProfit');
+    profitEl.textContent = fmt(data.profit);
+    profitEl.className = 'stat-value ' + (data.profit >= 0 ? 'green' : 'danger');
+    profitEl.style.fontSize = '24px';
+
+    document.getElementById('statFoodcost').textContent =
+      data.foodCostPct === null ? '—' : data.foodCostPct + '%';
+  } catch (err) {
+    showToast(err.message || 'Помилка завантаження', 'error');
+  }
+}
+
+function showToast(msg, type = '') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `toast ${type} show`;
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+document.getElementById('loadBtn').addEventListener('click', loadDashboard);
+
+document.getElementById('syncFinanceBtn').addEventListener('click', async () => {
+  const from = document.getElementById('fromDate').value;
+  const to = document.getElementById('toDate').value;
+  if (!from || !to) { showToast('Вкажи період', 'error'); return; }
+
+  document.getElementById('syncStatus').textContent = 'Синхронізація...';
+  try {
+    const res = await authFetch('/api/poster/sync-finance', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, to })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    document.getElementById('syncStatus').textContent = '';
+    showToast('✓ ЗП синхронізовано з Poster', 'success');
+    loadDashboard();
+  } catch (err) {
+    document.getElementById('syncStatus').textContent = '';
+    showToast(err.message || 'Помилка синхронізації', 'error');
+  }
+});
+
+applyPreset('month');
+loadDashboard();
+</script>
+</body>
+</html>

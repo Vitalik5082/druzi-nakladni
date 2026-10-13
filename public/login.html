@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Вхід</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .login-box { width: 320px; max-width: calc(100vw - 32px); background: var(--bg2); border: 1px solid var(--border2); border-radius: 12px; padding: 28px; }
+  .login-logo { font-family: var(--font-display); font-size: 16px; font-weight: 600; color: var(--accent); margin-bottom: 4px; text-align: center; }
+  .login-logo span { color: var(--text2); font-weight: 400; }
+  .login-sub { color: var(--text3); font-size: 11px; text-align: center; margin-bottom: 20px; }
+  .login-box input { width: 100%; background: var(--bg3); border: 1px solid var(--border); border-radius: 7px; color: var(--text); font-family: var(--font-mono); font-size: 13px; padding: 10px 12px; margin-bottom: 12px; }
+  .login-box input:focus { outline: none; border-color: var(--accent); }
+  .login-box button { width: 100%; }
+  .login-error { color: var(--danger); font-size: 12px; text-align: center; margin-bottom: 12px; display: none; }
+</style>
+</head>
+<body>
+
+<div class="login-box">
+  <div class="login-logo">invoice<span>.ai</span></div>
+  <div class="login-sub">Увійдіть, щоб продовжити</div>
+  <div class="login-error" id="loginError">Невірний email або пароль</div>
+  <input type="email" id="email" placeholder="Email" autofocus>
+  <input type="password" id="password" placeholder="Пароль">
+  <button class="btn primary" id="loginBtn">Увійти</button>
+</div>
+
+<script src="auth.js"></script>
+<script>
+async function doLogin() {
+  const email = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value;
+  const errorBox = document.getElementById('loginError');
+  errorBox.style.display = 'none';
+
+  try {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+      method: 'POST',
+      headers: { apikey: SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.access_token) { errorBox.style.display = 'block'; return; }
+
+    setToken(data.access_token);
+    window.location.href = 'index.html';
+  } catch {
+    errorBox.style.display = 'block';
+  }
+}
+
+document.getElementById('loginBtn').addEventListener('click', doLogin);
+document.getElementById('password').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doLogin();
+});
+document.getElementById('email').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('password').focus();
+});
+</script>
+</body>
+</html>

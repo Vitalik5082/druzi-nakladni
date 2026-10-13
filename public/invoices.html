@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Реєстр накладних</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  .supplier-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 10px; overflow: hidden; }
+  .supplier-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; cursor: pointer; }
+  .supplier-head:hover { background: var(--bg3); }
+  .supplier-name { font-family: var(--font-display); font-size: 13px; font-weight: 600; }
+  .supplier-meta { display: flex; gap: 18px; align-items: center; font-size: 11px; color: var(--text3); }
+  .supplier-body { display: none; border-top: 1px solid var(--border); }
+  .supplier-card.open .supplier-body { display: block; }
+  .supplier-card.open .chevron { transform: rotate(90deg); }
+  .chevron { display: inline-block; transition: transform .15s; color: var(--text3); margin-left: 8px; }
+
+  .inv-row { border-bottom: 1px solid var(--border); }
+  .inv-row:last-child { border-bottom: none; }
+  .inv-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 18px; cursor: pointer; font-size: 12px; }
+  .inv-head:hover { background: rgba(255,255,255,.02); }
+  .inv-meta { display: flex; gap: 14px; align-items: center; }
+  .inv-items { display: none; padding: 0 18px 14px 18px; }
+  .inv-row.open .inv-items { display: block; }
+  .inv-row.open .inv-chevron { transform: rotate(90deg); }
+</style>
+</head>
+<body>
+
+<div id="header-root"></div>
+<script src="auth.js"></script>
+<script src="nav.js"></script>
+<script>renderNav('invoices'); requireAuth();</script>
+
+<main class="wide">
+  <h1 class="page-title">Реєстр накладних</h1>
+  <div class="page-sub">Накладні згруповані по постачальниках. Суми показані без ПДВ і з ПДВ (×1.2)</div>
+
+  <div class="form-card">
+    <div class="form-grid">
+      <div class="form-field">
+        <label for="filterStatus">Статус</label>
+        <select id="filterStatus">
+          <option value="">Усі</option>
+          <option value="unpaid">Не оплачено</option>
+          <option value="partial">Частково</option>
+          <option value="paid">Оплачено</option>
+        </select>
+      </div>
+      <div class="form-field">
+        <label for="filterSupplier">Постачальник</label>
+        <input id="filterSupplier" placeholder="пошук...">
+      </div>
+      <div class="form-field">
+        <label for="filterFrom">Від</label>
+        <input id="filterFrom" type="date">
+      </div>
+      <div class="form-field">
+        <label for="filterTo">До</label>
+        <input id="filterTo" type="date">
+      </div>
+    </div>
+    <button class="btn primary" id="applyFilterBtn">Фільтрувати</button>
+    <button class="btn" id="clearFilterBtn">Очистити</button>
+  </div>
+
+  <div class="stats-row" style="grid-template-columns:repeat(3,1fr)">
+    <div class="stat-card">
+      <div class="stat-label">Накладних</div>
+      <div class="stat-value info" id="statCount">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Разом (без ПДВ)</div>
+      <div class="stat-value" id="statTotal">0 ₴</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Борг</div>
+      <div class="stat-value danger" id="statDebt">0 ₴</div>
+    </div>
+  </div>
+
+  <div id="foldersWrap"></div>
+</main>
+
+<!-- PAY MODAL -->
+<div class="modal-overlay" id="payModal">
+  <div class="modal">
+    <div class="modal-title">Відмітити оплату</div>
+    <div class="modal-sub" id="payModalSub"></div>
+    <div class="form-grid">
+      <div class="form-field">
+        <label for="payAmount">Сплачено (₴)</label>
+        <input id="payAmount" type="number" step="any">
+      </div>
+      <div class="form-field">
+        <label for="payDate">Дата оплати</label>
+        <input id="payDate" type="date">
+      </div>
+      <div class="form-field">
+        <label for="payDue">Термін оплати</label>
+        <input id="payDue" type="date">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closePayModal()">Скасувати</button>
+      <button class="btn primary" onclick="confirmPay()">Зберегти</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let invoices = [];
+let payModalId = null;
+const openFolders = new Set();
+const openInvoices = new Set();
+
+async function loadInvoices() {
+  const params = new URLSearchParams();
+  const status = document.getElementById('filterStatus').value;
+  const supplier = document.getElementById('filterSupplier').value.trim();
+  const from = document.getElementById('filterFrom').value;
+  const to = document.getElementById('filterTo').value;
+  if (status) params.set('status', status);
+  if (supplier) params.set('supplier', supplier);
+  if (from) params.set('from', from);
+  if (to) params.set('to', to);
+
+  const res = await authFetch('/api/invoices?' + params.toString());
+  invoices = await res.json();
+  render();
+}
+
+function statusLabel(s) {
+  return { unpaid: 'Не оплачено', partial: 'Частково', paid: 'Оплачено' }[s] || s;
+}
+
+function render() {
+  const total = invoices.reduce((s, i) => s + (i.total || 0), 0);
+  const debt = invoices.reduce((s, i) => s + Math.max(0, (i.total || 0) - (i.paidAmount || 0)), 0);
+
+  document.getElementById('statCount').textContent = invoices.length;
+  document.getElementById('statTotal').textContent = total.toFixed(2) + ' ₴';
+  document.getElementById('statDebt').textContent = debt.toFixed(2) + ' ₴';
+
+  const wrap = document.getElementById('foldersWrap');
+
+  if (!invoices.length) {
+    wrap.innerHTML = `<div class="empty">
+      <div class="empty-icon">📄</div>
+      <div class="empty-title">Немає накладних</div>
+      <div>Збережіть накладну на сторінці "Накладні"</div></div>`;
+    return;
+  }
+
+  const bySupplier = {};
+  for (const inv of invoices) {
+    const key = inv.supplier || '— без постачальника —';
+    (bySupplier[key] = bySupplier[key] || []).push(inv);
+  }
+
+  const suppliers = Object.keys(bySupplier).sort((a, b) => {
+    const debtA = bySupplier[a].reduce((s, i) => s + Math.max(0, (i.total||0)-(i.paidAmount||0)), 0);
+    const debtB = bySupplier[b].reduce((s, i) => s + Math.max(0, (i.total||0)-(i.paidAmount||0)), 0);
+    return debtB - debtA;
+  });
+
+  wrap.innerHTML = suppliers.map(supplier => {
+    const list = bySupplier[supplier].sort((a, b) => b.date.localeCompare(a.date));
+    const supplierTotal = list.reduce((s, i) => s + (i.total || 0), 0);
+    const supplierDebt = list.reduce((s, i) => s + Math.max(0, (i.total||0)-(i.paidAmount||0)), 0);
+    const isOpen = openFolders.has(supplier);
+
+    return `
+    <div class="supplier-card ${isOpen ? 'open' : ''}" data-supplier="${escHtml(supplier)}">
+      <div class="supplier-head" onclick="toggleFolder('${escAttr(supplier)}')">
+        <div class="supplier-name">${escHtml(supplier)} <span class="chevron">▸</span></div>
+        <div class="supplier-meta">
+          <span>${list.length} накл.</span>
+          <span>${supplierTotal.toFixed(2)} ₴</span>
+          ${supplierDebt > 0.01 ? `<span class="status-badge unpaid">борг ${supplierDebt.toFixed(2)} ₴</span>` : `<span class="status-badge paid">без боргу</span>`}
+        </div>
+      </div>
+      <div class="supplier-body">
+        ${list.map(inv => renderInvoiceRow(inv)).join('')}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderInvoiceRow(inv) {
+  const isOpen = openInvoices.has(inv.id);
+  return `
+  <div class="inv-row ${isOpen ? 'open' : ''}" data-inv="${inv.id}">
+    <div class="inv-head" onclick="toggleInvoice(${inv.id})">
+      <div class="inv-meta">
+        <span class="inv-chevron" style="display:inline-block;transition:transform .15s;color:var(--text3)">▸</span>
+        <span>${inv.date}</span>
+        <span>${inv.items.filter(i=>!i.skipped).length} позицій</span>
+      </div>
+      <div class="inv-meta">
+        <span class="total-cell">${(inv.total||0).toFixed(2)} ₴ <span style="color:var(--text3);font-weight:400">(з ПДВ ${(inv.total_with_vat || inv.total*1.2).toFixed(2)} ₴)</span></span>
+        <span class="status-badge ${inv.status}">${statusLabel(inv.status)}</span>
+        <button class="btn sm" onclick="event.stopPropagation(); openPayModal(${inv.id})">Оплата</button>
+      </div>
+    </div>
+    <div class="inv-items">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Товар</th>
+              <th style="text-align:right">К-сть</th>
+              <th>Од.</th>
+              <th style="text-align:right">Ціна (без ПДВ)</th>
+              <th style="text-align:right">Ціна (з ПДВ)</th>
+              <th style="text-align:right">Сума</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${inv.items.filter(i => !i.skipped).map(i => `
+              <tr>
+                <td>${escHtml(i.name)}</td>
+                <td style="text-align:right">${i.qty}</td>
+                <td><span class="unit-badge">${i.unit}</span></td>
+                <td style="text-align:right">${(i.price||0).toFixed(2)} ₴</td>
+                <td style="text-align:right">${(i.price_with_vat || i.price*1.2 || 0).toFixed(2)} ₴</td>
+                <td style="text-align:right" class="total-cell">${(i.total||0).toFixed(2)} ₴</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>`;
+}
+
+function toggleFolder(supplier) {
+  if (openFolders.has(supplier)) openFolders.delete(supplier);
+  else openFolders.add(supplier);
+  render();
+}
+
+function toggleInvoice(id) {
+  if (openInvoices.has(id)) openInvoices.delete(id);
+  else openInvoices.add(id);
+  render();
+}
+
+function openPayModal(id) {
+  const inv = invoices.find(i => i.id === id);
+  if (!inv) return;
+  payModalId = id;
+  document.getElementById('payModalSub').textContent =
+    `${escHtml(inv.supplier || '—')} від ${inv.date} — сума ${inv.total.toFixed(2)} ₴`;
+  document.getElementById('payAmount').value = inv.paidAmount || 0;
+  document.getElementById('payDate').value = inv.paidDate || '';
+  document.getElementById('payDue').value = inv.dueDate || '';
+  document.getElementById('payModal').classList.add('open');
+}
+
+function closePayModal() {
+  document.getElementById('payModal').classList.remove('open');
+  payModalId = null;
+}
+
+async function confirmPay() {
+  if (payModalId === null) return;
+  const paidAmount = parseFloat(document.getElementById('payAmount').value) || 0;
+  const paidDate = document.getElementById('payDate').value || null;
+  const dueDate = document.getElementById('payDue').value || null;
+
+  try {
+    const res = await authFetch(`/api/invoices/${payModalId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paidAmount, paidDate, dueDate })
+    });
+    if (!res.ok) throw new Error();
+    closePayModal();
+    showToast('✓ Оплату збережено', 'success');
+    loadInvoices();
+  } catch {
+    showToast('Помилка збереження', 'error');
+  }
+}
+
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escAttr(s) {
+  return escHtml(s).replace(/'/g, '&#39;');
+}
+
+function showToast(msg, type = '') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `toast ${type} show`;
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+document.getElementById('applyFilterBtn').addEventListener('click', loadInvoices);
+document.getElementById('clearFilterBtn').addEventListener('click', () => {
+  document.getElementById('filterStatus').value = '';
+  document.getElementById('filterSupplier').value = '';
+  document.getElementById('filterFrom').value = '';
+  document.getElementById('filterTo').value = '';
+  loadInvoices();
+});
+document.getElementById('payModal').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closePayModal();
+});
+
+loadInvoices();
+</script>
+</body>
+</html>

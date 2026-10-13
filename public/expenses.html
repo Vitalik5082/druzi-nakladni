@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Витрати</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="header-root"></div>
+<script src="auth.js"></script>
+<script src="nav.js"></script>
+<script src="dateutil.js"></script>
+<script>renderNav('expenses'); requireAuth();</script>
+
+<main>
+  <h1 class="page-title">Витрати</h1>
+  <div class="page-sub">Витрати, що не пов'язані з накладними товарів — оренда, комуналка, маркетинг, ремонт тощо</div>
+
+  <div class="form-card">
+    <div class="form-grid">
+      <div class="form-field">
+        <label for="expDate">Дата</label>
+        <input id="expDate" type="date">
+      </div>
+      <div class="form-field">
+        <label for="expCategory">Категорія</label>
+        <select id="expCategory">
+          <option value="Оренда">Оренда</option>
+          <option value="Комуналка">Комуналка</option>
+          <option value="Інтернет">Інтернет</option>
+          <option value="Сміття">Сміття</option>
+          <option value="Підписки">Підписки</option>
+          <option value="Хімія">Хімія</option>
+          <option value="Пакування">Пакування</option>
+          <option value="Маркетинг">Маркетинг</option>
+          <option value="Ремонт">Ремонт</option>
+          <option value="Інше">Інше</option>
+        </select>
+      </div>
+      <div class="form-field">
+        <label for="expDescription">Опис</label>
+        <input id="expDescription" placeholder="опційно">
+      </div>
+      <div class="form-field">
+        <label for="expAmount">Сума (₴)</label>
+        <input id="expAmount" type="number" step="any" placeholder="1500">
+      </div>
+    </div>
+    <button class="btn primary" id="saveExpenseBtn">Додати витрату</button>
+  </div>
+
+  <!-- RECURRING EXPENSES -->
+  <div class="form-card">
+    <div class="results-header" style="margin-bottom:14px">
+      <div>
+        <div class="results-title">Регулярні щомісячні витрати</div>
+        <div class="results-meta">Інтернет, оренда, комуналка, сміття, підписки — застосуй за потрібний місяць одним кліком</div>
+      </div>
+    </div>
+
+    <div id="recurringList"></div>
+
+    <div class="form-grid" style="margin-top:14px">
+      <div class="form-field">
+        <label for="recurringMonth">Застосувати за місяць</label>
+        <input id="recurringMonth" type="month">
+      </div>
+    </div>
+    <button class="btn primary" id="applyRecurringBtn">Застосувати обрані</button>
+
+    <div class="form-grid" style="margin-top:18px;border-top:1px solid var(--border);padding-top:14px">
+      <div class="form-field">
+        <label for="newRecName">Нова регулярна витрата</label>
+        <input id="newRecName" placeholder="напр. Охорона">
+      </div>
+      <div class="form-field">
+        <label for="newRecCategory">Категорія</label>
+        <select id="newRecCategory">
+          <option value="Оренда">Оренда</option>
+          <option value="Комуналка">Комуналка</option>
+          <option value="Інтернет">Інтернет</option>
+          <option value="Сміття">Сміття</option>
+          <option value="Підписки">Підписки</option>
+          <option value="Хімія">Хімія</option>
+          <option value="Пакування">Пакування</option>
+          <option value="Маркетинг">Маркетинг</option>
+          <option value="Ремонт">Ремонт</option>
+          <option value="Інше">Інше</option>
+        </select>
+      </div>
+      <div class="form-field">
+        <label for="newRecAmount">Сума (₴)</label>
+        <input id="newRecAmount" type="number" step="any">
+      </div>
+    </div>
+    <button class="btn" id="addRecurringBtn">+ Додати в регулярні</button>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Дата</th>
+          <th>Категорія</th>
+          <th>Опис</th>
+          <th style="text-align:right">Сума</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+async function loadExpenses() {
+  const res = await authFetch('/api/expenses');
+  const expenses = await res.json();
+  const tbody = document.getElementById('tableBody');
+
+  if (!expenses.length) {
+    tbody.innerHTML = `<tr><td colspan="5"><div class="empty">
+      <div class="empty-icon">💸</div>
+      <div class="empty-title">Ще немає витрат</div></div></td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = expenses.map(e => `
+    <tr>
+      <td>${e.date}</td>
+      <td><span class="unit-badge">${escHtml(e.category)}</span></td>
+      <td>${escHtml(e.description || '—')}</td>
+      <td style="text-align:right" class="total-cell">${e.amount.toFixed(2)} ₴</td>
+      <td><button class="btn sm danger" onclick="deleteExpense(${e.id})">✕</button></td>
+    </tr>
+  `).join('');
+}
+
+document.getElementById('saveExpenseBtn').addEventListener('click', async () => {
+  const date = document.getElementById('expDate').value;
+  const category = document.getElementById('expCategory').value;
+  const description = document.getElementById('expDescription').value.trim();
+  const amount = document.getElementById('expAmount').value;
+
+  if (!date) { showToast('Вкажи дату', 'error'); return; }
+  if (amount === '' || isNaN(Number(amount))) { showToast('Вкажи суму', 'error'); return; }
+
+  try {
+    const res = await authFetch('/api/expenses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, category, description, amount })
+    });
+    if (!res.ok) throw new Error();
+    showToast('✓ Витрату додано', 'success');
+    document.getElementById('expDescription').value = '';
+    document.getElementById('expAmount').value = '';
+    loadExpenses();
+  } catch {
+    showToast('Помилка збереження', 'error');
+  }
+});
+
+async function deleteExpense(id) {
+  if (!confirm('Видалити цю витрату?')) return;
+  try {
+    const res = await authFetch(`/api/expenses/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error();
+    loadExpenses();
+  } catch {
+    showToast('Помилка видалення', 'error');
+  }
+}
+
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function showToast(msg, type = '') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `toast ${type} show`;
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// ── RECURRING EXPENSES ──────────────────────────────────────────
+let recurringTemplates = [];
+
+async function loadRecurring() {
+  const res = await authFetch('/api/recurring-expenses');
+  recurringTemplates = await res.json();
+  renderRecurring();
+}
+
+function renderRecurring() {
+  const wrap = document.getElementById('recurringList');
+  if (!recurringTemplates.length) {
+    wrap.innerHTML = `<div style="color:var(--text3);font-size:12px">Ще немає регулярних витрат</div>`;
+    return;
+  }
+
+  wrap.innerHTML = recurringTemplates.map(t => `
+    <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+      <input type="checkbox" class="rec-check" data-id="${t.id}" checked style="width:16px;height:16px">
+      <div style="flex:1">
+        <div>${escHtml(t.name)} <span class="unit-badge">${escHtml(t.category)}</span></div>
+        ${t.note ? `<div style="font-size:10px;color:var(--text3)">${escHtml(t.note)}</div>` : ''}
+      </div>
+      <input type="number" class="price-input rec-amount" data-id="${t.id}" value="${t.amount}" step="any" style="width:100px">
+      <button class="btn sm danger" onclick="deleteRecurring(${t.id})">✕</button>
+    </div>
+  `).join('');
+}
+
+document.getElementById('addRecurringBtn').addEventListener('click', async () => {
+  const name = document.getElementById('newRecName').value.trim();
+  const category = document.getElementById('newRecCategory').value;
+  const amount = document.getElementById('newRecAmount').value;
+
+  if (!name) { showToast('Введи назву', 'error'); return; }
+  if (amount === '' || isNaN(Number(amount))) { showToast('Введи суму', 'error'); return; }
+
+  try {
+    const res = await authFetch('/api/recurring-expenses', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, category, amount })
+    });
+    if (!res.ok) throw new Error();
+    document.getElementById('newRecName').value = '';
+    document.getElementById('newRecAmount').value = '';
+    showToast('✓ Додано в регулярні', 'success');
+    loadRecurring();
+  } catch {
+    showToast('Помилка збереження', 'error');
+  }
+});
+
+async function deleteRecurring(id) {
+  if (!confirm('Видалити цю регулярну витрату зі списку?')) return;
+  try {
+    const res = await authFetch(`/api/recurring-expenses/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error();
+    loadRecurring();
+  } catch {
+    showToast('Помилка видалення', 'error');
+  }
+}
+
+document.getElementById('applyRecurringBtn').addEventListener('click', async () => {
+  const month = document.getElementById('recurringMonth').value;
+  if (!month) { showToast('Вкажи місяць', 'error'); return; }
+
+  const items = [];
+  document.querySelectorAll('.rec-check').forEach(cb => {
+    if (!cb.checked) return;
+    const id = cb.dataset.id;
+    const amountInput = document.querySelector(`.rec-amount[data-id="${id}"]`);
+    items.push({ id, amount: parseFloat(amountInput.value) || 0 });
+  });
+  if (!items.length) { showToast('Нічого не обрано', 'error'); return; }
+
+  try {
+    const res = await authFetch('/api/recurring-expenses/apply', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ month, items })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    let msg = `✓ Додано ${data.created.length} витрат за ${month}`;
+    if (data.skipped.length) msg += ` (пропущено вже існуючі: ${data.skipped.join(', ')})`;
+    showToast(msg, 'success');
+    loadExpenses();
+  } catch (err) {
+    showToast(err.message || 'Помилка застосування', 'error');
+  }
+});
+
+document.getElementById('recurringMonth').value = todayStr().slice(0, 7);
+
+document.getElementById('expDate').value = todayStr();
+loadExpenses();
+loadRecurring();
+</script>
+</body>
+</html>

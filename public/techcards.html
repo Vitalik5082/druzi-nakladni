@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Техкарти</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  .card-row { border-bottom: 1px solid var(--border); }
+  .card-row:last-child { border-bottom: none; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 18px; cursor: pointer; font-size: 12px; }
+  .card-head:hover { background: rgba(255,255,255,.02); }
+  .card-body { display: none; padding: 0 18px 14px 18px; }
+  .card-row.open .card-body { display: block; }
+  .card-row.open .chevron { transform: rotate(90deg); }
+  .chevron { display: inline-block; transition: transform .15s; color: var(--text3); margin-right: 8px; }
+</style>
+</head>
+<body>
+
+<div id="header-root"></div>
+<script src="auth.js"></script>
+<script src="nav.js"></script>
+<script>renderNav('techcards'); requireAuth();</script>
+
+<main class="wide">
+  <h1 class="page-title">Техкарти</h1>
+  <div class="page-sub">Склад страв з Poster (брутто/нетто/собівартість інгредієнтів). Оновлюй раз на місяць або коли з'являються нові страви</div>
+
+  <div class="form-card">
+    <input class="modal-search" id="searchInput" placeholder="Пошук страви..." style="margin-bottom:10px">
+    <button class="btn primary" id="syncBtn">↻ Синхронізувати з Poster</button>
+    <span id="syncStatus" style="font-size:11px;color:var(--text3);margin-left:8px"></span>
+    <span style="font-size:11px;color:var(--text3);margin-left:8px" id="countLabel"></span>
+  </div>
+
+  <div class="table-wrap" id="listWrap"></div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let cards = [];
+
+async function loadTechcards() {
+  const res = await authFetch('/api/poster/techcards');
+  cards = await res.json();
+  render();
+}
+
+function render() {
+  const q = document.getElementById('searchInput').value.toLowerCase();
+  const filtered = cards.filter(c => c.name.toLowerCase().includes(q));
+  document.getElementById('countLabel').textContent = `${filtered.length} з ${cards.length} страв`;
+
+  const wrap = document.getElementById('listWrap');
+  if (!filtered.length) {
+    wrap.innerHTML = `<div class="empty">
+      <div class="empty-icon">🍽</div>
+      <div class="empty-title">Немає техкарт</div>
+      <div>Натисни "Синхронізувати з Poster"</div></div>`;
+    return;
+  }
+
+  wrap.innerHTML = filtered.map((c, idx) => {
+    const hasRecipe = c.ingredients && c.ingredients.length > 0;
+    return `
+    <div class="card-row" data-idx="${idx}">
+      <div class="card-head" onclick="toggleCard(${idx})">
+        <div><span class="chevron">▸</span>${escHtml(c.name)} <span style="color:var(--text3);font-size:10px">(${escHtml(c.category_name || '')})</span>
+          ${c.isExpanded ? '<span class="invoice-badge" style="background:rgba(255,179,64,.1);color:var(--warn);border-color:rgba(255,179,64,.3)">модифікатор</span>' : ''}
+        </div>
+        <div style="color:var(--text3)">${hasRecipe ? c.ingredients.length + ' інгредієнтів' : (c.ingredient_id ? 'прямий товар' : 'без складу')}</div>
+      </div>
+      <div class="card-body">
+        ${hasRecipe ? `
+          <table>
+            <thead><tr><th>Інгредієнт</th><th style="text-align:right">Брутто</th><th style="text-align:right">Нетто</th><th>Од.</th><th style="text-align:right">Собівартість</th></tr></thead>
+            <tbody>
+              ${c.ingredients.map(i => `
+                <tr>
+                  <td>${escHtml(i.name)}${i.fromModifier ? ' <span class="invoice-badge" style="background:rgba(255,179,64,.1);color:var(--warn);border-color:rgba(255,179,64,.3)">з модифікатора</span>' : ''}</td>
+                  <td style="text-align:right">${i.brutto}</td>
+                  <td style="text-align:right">${i.netto}</td>
+                  <td><span class="unit-badge">${i.unit}</span></td>
+                  <td style="text-align:right">${i.selfprice.toFixed(2)} ₴</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        ` : `<div style="color:var(--text3);font-size:12px;padding:8px 0">Цей товар продається напряму як складський інгредієнт (без складеного рецепту).</div>`}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function toggleCard(idx) {
+  document.querySelector(`.card-row[data-idx="${idx}"]`).classList.toggle('open');
+}
+
+document.getElementById('searchInput').addEventListener('input', render);
+
+document.getElementById('syncBtn').addEventListener('click', async () => {
+  document.getElementById('syncStatus').textContent = 'Синхронізація... (може зайняти до хвилини)';
+  try {
+    const res = await authFetch('/api/poster/sync-techcards', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    document.getElementById('syncStatus').textContent = '';
+    showToast(`✓ Синхронізовано ${data.synced} страв`, 'success');
+    loadTechcards();
+  } catch (err) {
+    document.getElementById('syncStatus').textContent = '';
+    showToast(err.message || 'Помилка синхронізації', 'error');
+  }
+});
+
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function showToast(msg, type = '') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `toast ${type} show`;
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+loadTechcards();
+</script>
+</body>
+</html>

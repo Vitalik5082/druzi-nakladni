@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI-чат</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  .chat-wrap { display: flex; flex-direction: column; height: calc(100vh - 220px); min-height: 400px; }
+  .chat-log { flex: 1; overflow-y: auto; background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; margin-bottom: 12px; }
+  .msg { max-width: 80%; padding: 10px 14px; border-radius: 10px; margin-bottom: 10px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
+  .msg.user { background: var(--accent); color: #000; margin-left: auto; }
+  .msg.assistant { background: var(--bg3); border: 1px solid var(--border); }
+  .msg.loading { color: var(--text3); font-style: italic; }
+  .chat-input-row { display: flex; gap: 8px; }
+  .chat-input-row input { flex: 1; background: var(--bg3); border: 1px solid var(--border); border-radius: 7px; color: var(--text); font-family: var(--font-mono); font-size: 13px; padding: 10px 12px; }
+  .chat-input-row input:focus { outline: none; border-color: var(--accent); }
+  .examples { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+  .example-chip { font-size: 11px; color: var(--text2); background: var(--bg3); border: 1px solid var(--border); border-radius: 99px; padding: 5px 12px; cursor: pointer; }
+  .example-chip:hover { border-color: var(--accent); color: var(--text); }
+</style>
+</head>
+<body>
+
+<div id="header-root"></div>
+<script src="auth.js"></script>
+<script src="nav.js"></script>
+<script>renderNav('chat'); requireAuth();</script>
+
+<main class="wide">
+  <h1 class="page-title">AI-чат</h1>
+  <div class="page-sub">Запитуй про продажі, рекомендації замовлень, маржинальність, худші/найкращі позиції — відповідає цифрами з наших даних, не вигадує</div>
+
+  <div class="examples">
+    <span class="example-chip" onclick="ask(this)">Скільки продано бургерів класичних за останній тиждень?</span>
+    <span class="example-chip" onclick="ask(this)">Що порекомендуєш замовити в постачальника Два Шефа?</span>
+    <span class="example-chip" onclick="ask(this)">На якому товарі ми найменше заробляємо?</span>
+    <span class="example-chip" onclick="ask(this)">Який товар найгірше продається?</span>
+  </div>
+
+  <div class="chat-wrap">
+    <div class="chat-log" id="chatLog"></div>
+    <div class="chat-input-row">
+      <input id="chatInput" placeholder="Напиши запитання..." autocomplete="off">
+      <button class="btn primary" id="sendBtn">Надіслати</button>
+      <button class="btn" id="clearBtn">Очистити</button>
+    </div>
+  </div>
+</main>
+
+<script>
+let history = [];
+
+function render() {
+  const log = document.getElementById('chatLog');
+  log.innerHTML = history.map(m => `<div class="msg ${m.role}">${escHtml(m.content)}</div>`).join('');
+  log.scrollTop = log.scrollHeight;
+}
+
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function send(text) {
+  if (!text.trim()) return;
+  history.push({ role: 'user', content: text });
+  render();
+
+  const log = document.getElementById('chatLog');
+  log.insertAdjacentHTML('beforeend', `<div class="msg assistant loading" id="loadingMsg">Думаю...</div>`);
+  log.scrollTop = log.scrollHeight;
+
+  try {
+    const res = await authFetch('/api/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: history })
+    });
+    const data = await res.json();
+    document.getElementById('loadingMsg')?.remove();
+    if (!res.ok) throw new Error(data.error);
+
+    history.push({ role: 'assistant', content: data.answer });
+    render();
+  } catch (err) {
+    document.getElementById('loadingMsg')?.remove();
+    history.push({ role: 'assistant', content: '⚠ Помилка: ' + (err.message || 'невідома') });
+    render();
+  }
+}
+
+document.getElementById('sendBtn').addEventListener('click', () => {
+  const input = document.getElementById('chatInput');
+  send(input.value);
+  input.value = '';
+});
+document.getElementById('chatInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('sendBtn').click();
+});
+document.getElementById('clearBtn').addEventListener('click', () => {
+  history = [];
+  render();
+});
+
+function ask(el) {
+  const input = document.getElementById('chatInput');
+  input.value = el.textContent;
+  document.getElementById('sendBtn').click();
+}
+</script>
+</body>
+</html>

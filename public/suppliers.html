@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Постачальники</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="header-root"></div>
+<script src="auth.js"></script>
+<script src="nav.js"></script>
+<script>renderNav('suppliers-list'); requireAuth();</script>
+
+<main class="wide">
+  <h1 class="page-title">Постачальники</h1>
+  <div class="page-sub">Проставте дні тижня замовлення/доставки — у ці дні щоденний Telegram-звіт нагадає замовити в цього постачальника (+ борг, якщо є).</div>
+
+  <div class="form-card">
+    <div class="form-grid" style="margin-bottom:10px">
+      <div class="form-field">
+        <label for="newName">Новий постачальник</label>
+        <input id="newName" placeholder="Назва">
+      </div>
+    </div>
+    <button class="btn" id="addBtn">+ Додати</button>
+  </div>
+
+  <div class="form-card">
+    <button class="btn primary" id="saveAllBtn">💾 Зберегти все</button>
+    <span id="saveStatus" style="font-size:11px;color:var(--text3);margin-left:8px"></span>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Постачальник</th>
+          <th>Дні замовлення</th>
+          <th>Контакт (ім'я, Viber/телефон, сайт)</th>
+          <th>Умови</th>
+        </tr>
+      </thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const DAYS = [
+  { v: 1, label: 'Пн' }, { v: 2, label: 'Вт' }, { v: 3, label: 'Ср' },
+  { v: 4, label: 'Чт' }, { v: 5, label: 'Пт' }, { v: 6, label: 'Сб' }, { v: 0, label: 'Нд' }
+];
+
+let suppliers = [];
+
+async function load() {
+  const res = await authFetch('/api/suppliers');
+  suppliers = await res.json();
+  render();
+}
+
+function render() {
+  const tbody = document.getElementById('tableBody');
+  if (!suppliers.length) {
+    tbody.innerHTML = `<tr><td colspan="5"><div class="empty"><div class="empty-title">Немає постачальників</div></div></td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = suppliers.map(s => {
+    const days = s.orderDays || [];
+    const checkboxes = DAYS.map(d => `
+      <label style="display:inline-flex;align-items:center;gap:3px;margin-right:8px;font-size:11px;color:var(--text2)">
+        <input type="checkbox" class="day-check" data-id="${s.id}" value="${d.v}" ${days.includes(d.v) ? 'checked' : ''}>
+        ${d.label}
+      </label>`).join('');
+
+    return `
+    <tr data-id="${s.id}">
+      <td>${escHtml(s.name)}</td>
+      <td style="white-space:nowrap">${checkboxes}</td>
+      <td><input class="modal-search contact-input" style="margin:0;width:220px" value="${escHtml(s.contact || '')}" placeholder="напр. Льоша, Viber 0685068409"></td>
+      <td><input class="modal-search terms-input" style="margin:0;width:140px" value="${escHtml(s.terms || '')}"></td>
+    </tr>`;
+  }).join('');
+}
+
+document.getElementById('saveAllBtn').addEventListener('click', async () => {
+  const rows = Array.from(document.querySelectorAll('#tableBody tr[data-id]')).map(tr => ({
+    id: Number(tr.dataset.id),
+    orderDays: Array.from(tr.querySelectorAll('.day-check:checked')).map(c => Number(c.value)),
+    contact: tr.querySelector('.contact-input').value.trim(),
+    terms: tr.querySelector('.terms-input').value.trim()
+  }));
+
+  document.getElementById('saveStatus').textContent = 'Збереження...';
+  try {
+    const res = await authFetch('/api/suppliers/batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rows })
+    });
+    if (!res.ok) throw new Error();
+    document.getElementById('saveStatus').textContent = '';
+    showToast(`✓ Збережено (${rows.length} постачальників)`, 'success');
+  } catch {
+    document.getElementById('saveStatus').textContent = '';
+    showToast('Помилка збереження', 'error');
+  }
+});
+
+document.getElementById('addBtn').addEventListener('click', async () => {
+  const name = document.getElementById('newName').value.trim();
+  if (!name) { showToast('Введи назву', 'error'); return; }
+  try {
+    const res = await authFetch('/api/suppliers', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name })
+    });
+    if (!res.ok) throw new Error();
+    document.getElementById('newName').value = '';
+    showToast('✓ Додано', 'success');
+    load();
+  } catch {
+    showToast('Помилка збереження', 'error');
+  }
+});
+
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function showToast(msg, type = '') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `toast ${type} show`;
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+load();
+</script>
+</body>
+</html>

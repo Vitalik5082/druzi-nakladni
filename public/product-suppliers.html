@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Постачальники товарів</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="header-root"></div>
+<script src="auth.js"></script>
+<script src="nav.js"></script>
+<script>renderNav('product-suppliers'); requireAuth();</script>
+
+<main class="wide">
+  <h1 class="page-title">Постачальники товарів (тимчасово)</h1>
+  <div class="page-sub">Для кожного інгредієнта — відміч усіх постачальників, у кого його берете (можна декілька зараз, уточните точніше пізніше).</div>
+
+  <div class="form-card">
+    <div class="form-grid" style="margin-bottom:10px">
+      <div class="form-field">
+        <label for="searchInput">Пошук товару</label>
+        <input class="modal-search" id="searchInput" placeholder="Назва інгредієнта..." style="margin:0">
+      </div>
+      <div class="form-field">
+        <label for="supplierFilter">Постачальник</label>
+        <select id="supplierFilter" style="background:var(--bg3);border:1px solid var(--border);border-radius:7px;color:var(--text);padding:8px 10px;font-family:var(--font-mono);font-size:12px">
+          <option value="">Усі постачальники</option>
+        </select>
+      </div>
+      <div class="form-field">
+        <label for="statusFilter">Заповненість</label>
+        <select id="statusFilter" style="background:var(--bg3);border:1px solid var(--border);border-radius:7px;color:var(--text);padding:8px 10px;font-family:var(--font-mono);font-size:12px">
+          <option value="">Усі</option>
+          <option value="filled">Заповнено</option>
+          <option value="empty">Не заповнено</option>
+        </select>
+      </div>
+    </div>
+    <button class="btn primary" id="saveAllBtn">💾 Зберегти все</button>
+    <span id="saveStatus" style="font-size:11px;color:var(--text3);margin-left:8px"></span>
+    <span id="countLabel" style="font-size:11px;color:var(--text3);margin-left:8px"></span>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Інгредієнт</th>
+          <th>Одиниця</th>
+          <th>Постачальники (можна декілька)</th>
+          <th>Нотатка</th>
+        </tr>
+      </thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let ingredients = [];
+let suppliers = [];
+let assignments = {};
+const touchedIds = new Set();
+
+async function loadData() {
+  const [ingRes, supRes, assignRes] = await Promise.all([
+    authFetch('/api/poster/ingredients'),
+    authFetch('/api/suppliers'),
+    authFetch('/api/product-suppliers')
+  ]);
+  ingredients = await ingRes.json();
+  suppliers = await supRes.json();
+  assignments = await assignRes.json();
+
+  document.getElementById('supplierFilter').innerHTML =
+    '<option value="">Усі постачальники</option>' +
+    suppliers.map(s => `<option value="${s.id}">${escHtml(s.name)}</option>`).join('');
+
+  render();
+}
+
+function render() {
+  const q = document.getElementById('searchInput').value.toLowerCase();
+  const supplierFilter = document.getElementById('supplierFilter').value;
+  const statusFilter = document.getElementById('statusFilter').value;
+
+  const filtered = ingredients.filter(i => {
+    if (!i.name.toLowerCase().includes(q)) return false;
+    const a = assignments[i.ingredient_id];
+    const isFilled = !!(a && ((a.supplierIds && a.supplierIds.length) || a.note));
+    if (statusFilter === 'filled' && !isFilled) return false;
+    if (statusFilter === 'empty' && isFilled) return false;
+    if (supplierFilter && !(a && (a.supplierIds || []).includes(Number(supplierFilter)))) return false;
+    return true;
+  }).sort((a, b) => a.name.localeCompare(b.name));
+
+  document.getElementById('countLabel').textContent = `${filtered.length} з ${ingredients.length}`;
+
+  const tbody = document.getElementById('tableBody');
+  if (!filtered.length) {
+    tbody.innerHTML = `<tr><td colspan="5"><div class="empty">
+      <div class="empty-icon">📦</div>
+      <div class="empty-title">Немає інгредієнтів</div>
+      <div>Синхронізуй їх на сторінці "Залишки" або "Техкарти"</div></div></td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = filtered.map(i => {
+    const a = assignments[i.ingredient_id] || {};
+    const ids = (a.supplierIds || []).map(Number);
+    const checkboxes = suppliers.map(s => `
+      <label style="display:inline-flex;align-items:center;gap:4px;margin:0 10px 4px 0;font-size:11px;color:var(--text2)">
+        <input type="checkbox" class="supplier-check" value="${s.id}" ${ids.includes(s.id) ? 'checked' : ''}>
+        ${escHtml(s.name)}
+      </label>`).join('');
+
+    return `
+    <tr data-id="${i.ingredient_id}">
+      <td>${escHtml(i.name)}</td>
+      <td><span class="unit-badge">${escHtml(i.unit)}</span></td>
+      <td style="max-width:420px">${checkboxes}</td>
+      <td><input class="modal-search note-input" style="margin:0" placeholder="опційно" value="${escHtml(a.note || '')}"></td>
+    </tr>`;
+  }).join('');
+}
+
+// Keep `assignments` in sync with the DOM as the user edits, so switching the search filter
+// (which re-renders only the visible rows) never loses edits made to rows that scroll out of view.
+document.getElementById('tableBody').addEventListener('change', e => {
+  const tr = e.target.closest('tr[data-id]');
+  if (!tr) return;
+  syncRowIntoState(tr);
+});
+document.getElementById('tableBody').addEventListener('input', e => {
+  if (!e.target.classList.contains('note-input')) return;
+  const tr = e.target.closest('tr[data-id]');
+  if (!tr) return;
+  syncRowIntoState(tr);
+});
+
+function syncRowIntoState(tr) {
+  const ingredientId = tr.dataset.id;
+  touchedIds.add(ingredientId);
+  const supplierIds = Array.from(tr.querySelectorAll('.supplier-check:checked')).map(c => Number(c.value));
+  const note = tr.querySelector('.note-input').value;
+  if (!supplierIds.length && !note.trim()) {
+    delete assignments[ingredientId];
+  } else {
+    assignments[ingredientId] = { supplierIds, note };
+  }
+}
+
+document.getElementById('saveAllBtn').addEventListener('click', async () => {
+  // capture any edits in currently-visible rows one last time before building the payload
+  document.querySelectorAll('#tableBody tr[data-id]').forEach(syncRowIntoState);
+
+  // include every row the user touched this session, even ones now empty (= explicit removal)
+  const rows = Array.from(touchedIds).map(ingredientId => {
+    const a = assignments[ingredientId] || { supplierIds: [], note: '' };
+    return { ingredientId, supplierIds: a.supplierIds, note: a.note };
+  });
+
+  document.getElementById('saveStatus').textContent = 'Збереження...';
+  try {
+    const res = await authFetch('/api/product-suppliers/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rows })
+    });
+    if (!res.ok) throw new Error();
+    document.getElementById('saveStatus').textContent = '';
+    showToast(`✓ Збережено (${rows.length} позицій)`, 'success');
+  } catch {
+    document.getElementById('saveStatus').textContent = '';
+    showToast('Помилка збереження', 'error');
+  }
+});
+
+document.getElementById('searchInput').addEventListener('input', render);
+document.getElementById('supplierFilter').addEventListener('change', render);
+document.getElementById('statusFilter').addEventListener('change', render);
+
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function showToast(msg, type = '') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `toast ${type} show`;
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+loadData();
+</script>
+</body>
+</html>

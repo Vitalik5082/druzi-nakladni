@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Реалізація</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="header-root"></div>
+<script src="auth.js"></script>
+<script src="nav.js"></script>
+<script src="dateutil.js"></script>
+<script>renderNav('sales'); requireAuth();</script>
+
+<main class="wide">
+  <h1 class="page-title">Реалізація (з Poster)</h1>
+  <div class="page-sub">Продажі по товарах за вибраний період. Дані кешуються в нас — для свіжих днів натисни "Синхронізувати"</div>
+
+  <div class="form-card">
+    <div class="form-grid">
+      <div class="form-field">
+        <label for="fromDate">Від</label>
+        <input id="fromDate" type="date">
+      </div>
+      <div class="form-field">
+        <label for="toDate">До</label>
+        <input id="toDate" type="date">
+      </div>
+    </div>
+    <button class="btn primary" id="loadBtn">Показати</button>
+    <button class="btn" id="syncBtn">↻ Синхронізувати з Poster</button>
+    <span id="syncStatus" style="font-size:11px;color:var(--text3);margin-left:8px"></span>
+  </div>
+
+  <div class="stats-row" style="grid-template-columns:repeat(3,1fr)">
+    <div class="stat-card">
+      <div class="stat-label">Днів з даними</div>
+      <div class="stat-value info" id="statDays">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Валовий виторг</div>
+      <div class="stat-value green" id="statGross">0 ₴</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Прибуток (по Poster)</div>
+      <div class="stat-value green" id="statProfit">0 ₴</div>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Товар</th>
+          <th>Модифікатор</th>
+          <th style="text-align:right">К-сть</th>
+          <th style="text-align:right">Виторг</th>
+          <th style="text-align:right">Прибуток</th>
+        </tr>
+      </thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+async function loadSales() {
+  const from = document.getElementById('fromDate').value;
+  const to = document.getElementById('toDate').value;
+  if (!from || !to) return;
+
+  const res = await authFetch(`/api/poster/sales?from=${from}&to=${to}`);
+  const data = await res.json();
+
+  document.getElementById('statDays').textContent = data.daysCount;
+  const gross = data.products.reduce((s, p) => s + p.grossSum, 0);
+  const profit = data.products.reduce((s, p) => s + p.profit, 0);
+  document.getElementById('statGross').textContent = gross.toFixed(2) + ' ₴';
+  document.getElementById('statProfit').textContent = profit.toFixed(2) + ' ₴';
+
+  const tbody = document.getElementById('tableBody');
+  if (!data.products.length) {
+    tbody.innerHTML = `<tr><td colspan="5"><div class="empty">
+      <div class="empty-icon">📊</div>
+      <div class="empty-title">Немає даних за цей період</div>
+      <div>Натисни "Синхронізувати з Poster"</div></div></td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = data.products.map(p => `
+    <tr>
+      <td>${escHtml(p.product_name)}</td>
+      <td style="color:var(--text3)">${escHtml(p.modificator_name || '—')}</td>
+      <td style="text-align:right">${p.qty.toFixed(p.qty % 1 === 0 ? 0 : 2)}</td>
+      <td style="text-align:right" class="total-cell">${p.grossSum.toFixed(2)} ₴</td>
+      <td style="text-align:right" style="color:var(--accent)">${p.profit.toFixed(2)} ₴</td>
+    </tr>
+  `).join('');
+}
+
+document.getElementById('syncBtn').addEventListener('click', async () => {
+  const from = document.getElementById('fromDate').value;
+  const to = document.getElementById('toDate').value;
+  if (!from || !to) { showToast('Вкажи період', 'error'); return; }
+
+  document.getElementById('syncStatus').textContent = 'Синхронізація...';
+  try {
+    const res = await authFetch('/api/poster/sync-sales', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, to })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    document.getElementById('syncStatus').textContent = '';
+    showToast(`✓ Синхронізовано ${data.daysSynced} дн.`, 'success');
+    loadSales();
+  } catch (err) {
+    document.getElementById('syncStatus').textContent = '';
+    showToast(err.message || 'Помилка синхронізації', 'error');
+  }
+});
+
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function showToast(msg, type = '') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `toast ${type} show`;
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+document.getElementById('loadBtn').addEventListener('click', loadSales);
+
+const today = new Date();
+const first = new Date(today.getFullYear(), today.getMonth(), 1);
+document.getElementById('fromDate').value = localDateStr(first);
+document.getElementById('toDate').value = todayStr();
+loadSales();
+</script>
+</body>
+</html>
