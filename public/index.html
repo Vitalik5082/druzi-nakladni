@@ -589,9 +589,22 @@ document.getElementById('exportBtn').addEventListener('click', async () => {
 });
 
 // ---- SAVE INVOICE ----
-async function saveInvoice(force) {
+async function saveInvoice(force, skipNewProductCheck) {
   const active = items.filter(i => !i.skipped);
   if (!active.length) { showToast('Немає позицій для збереження', 'error'); return; }
+
+  if (!skipNewProductCheck) {
+    const newOnes = active.filter(i => i.isNewProduct);
+    if (newOnes.length) {
+      const names = newOnes.map(i => `• ${i.name}`).join('\n');
+      const ok = confirm(
+        `Ці товари НЕ знайдено в довіднику — вони додадуться як НОВІ товари, а не приєднаються до існуючих:\n\n${names}\n\n` +
+        `Якщо це помилка (товар насправді вже є в довіднику) — натисни "Скасувати" й виправ відповідність кнопкою ✎.\n\n` +
+        `Продовжити й додати як нові товари?`
+      );
+      if (!ok) return;
+    }
+  }
 
   const supplier = document.getElementById('metaSupplier').value.trim();
   const date = document.getElementById('metaDate').value || todayStr();
@@ -606,7 +619,7 @@ async function saveInvoice(force) {
 
     if (res.status === 409) {
       if (confirm(`${data.message}\n\nЦе дійсно 2 різні накладні? Додати все одно?`)) {
-        return saveInvoice(true);
+        return saveInvoice(true, true);
       }
       return;
     }
