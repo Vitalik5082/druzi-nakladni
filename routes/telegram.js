@@ -7,7 +7,7 @@ const express = require('express');
 const { readJSON } = require('../lib/store');
 const { normalize } = require('../lib/convert');
 const { localDateStr } = require('../lib/poster');
-const { recognizeInvoiceImage } = require('./recognition');
+const { recognizeInvoiceImage, recognizeReceiptImage } = require('./recognition');
 const { createInvoice, updateInvoice } = require('./invoices');
 
 const router = express.Router();
@@ -61,23 +61,43 @@ function findSupplier(suppliers, guessName) {
   return match || null;
 }
 
+async function markInvoicePaid(invoice, paidDate) {
+  await updateInvoice(invoice.id, { paidAmount: invoice.total, paidDate: paidDate || localDateStr() });
+}
+
 async function handleCallback(callbackQuery) {
   const chatId = String(callbackQuery.message.chat.id);
   const messageId = callbackQuery.message.message_id;
   const data = callbackQuery.data || '';
-  const [, action, idStr] = data.match(/^pay:(yes|no):(\d+)$/) || [];
 
-  if (!action) { await tg('answerCallbackQuery', { callback_query_id: callbackQuery.id }); return; }
+  const payMatch = data.match(/^pay:(yes|no):(\d+)$/);
+  const receiptMatch = data.match(/^recv:(\d+)$/);
+
+  if (!payMatch && !receiptMatch) {
+    await tg('answerCallbackQuery', { callback_query_id: callbackQuery.id });
+    return;
+  }
 
   const invoices = await readJSON(FILE, []);
-  const invoice = invoices.find(inv => inv.id === Number(idStr));
+  const invoice = invoices.find(inv => inv.id === Number(payMatch ? payMatch[2] : receiptMatch[1]));
   if (!invoice) {
     await tg('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Накладну не знайдено' });
     return;
   }
 
+  if (receiptMatch) {
+    await markInvoicePaid(invoice);
+    await tg('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Оплату прив\'язано' });
+    await tg('editMessageText', {
+      chat_id: chatId, message_id: messageId,
+      text: `✅ Чек прив'язано до: ${invoice.supplier}, ${invoice.date}, ${invoice.total.toFixed(2)} ₴`
+    });
+    return;
+  }
+
+  const [, action] = payMatch;
   if (action === 'yes') {
-    await updateInvoice(invoice.id, { paidAmount: invoice.total, paidDate: localDateStr() });
+    await markInvoicePaid(invoice);
     await tg('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Позначено як оплачено' });
     await tg('editMessageText', {
       chat_id: chatId, message_id: messageId,
@@ -90,6 +110,63 @@ async function handleCallback(callbackQuery) {
       text: `📝 Записано як борг (${invoice.total.toFixed(2)} ₴)`
     });
   }
+}
+
+// Бухгалтер drops a payment receipt photo — match it to outstanding debt by remaining balance
+// (± 1 ₴, same tolerance the invoice-duplicate check uses) and, if the receipt shows a
+// recognizable recipient, narrow further by supplier.
+async function handleReceiptPhoto(chatId, base64) {
+  const result = await recognizeReceiptImage(base64, 'image/jpeg');
+
+  if (!result.amount) {
+    await reply(chatId, '⚠️ Не вдалось розпізнати суму на чеку. Перевірте вручну на сайті.');
+    return;
+  }
+
+  const invoices = await readJSON(FILE, []);
+  const suppliers = await readJSON('suppliers.json', []);
+
+  const outstanding = invoices
+    .map(inv => ({ inv, balance: Number(((inv.total || 0) - (inv.paidAmount || 0)).toFixed(2)) }))
+    .filter(x => x.balance > 0.01);
+
+  let candidates = outstanding.filter(x => Math.abs(x.balance - result.amount) < 1);
+
+  if (candidates.length > 1 && result.recipient) {
+    const matchedSupplier = findSupplier(suppliers, result.recipient);
+    if (matchedSupplier) {
+      const narrowed = candidates.filter(x =>
+        (x.inv.supplier || '').toLowerCase() === matchedSupplier.name.toLowerCase());
+      if (narrowed.length) candidates = narrowed;
+    }
+  }
+
+  if (!candidates.length) {
+    await reply(chatId,
+      `⚠️ Не знайшов накладної з боргом ${result.amount.toFixed(2)} ₴${result.recipient ? ' (отримувач: ' + result.recipient + ')' : ''}. ` +
+      `Перевірте вручну на сайті в розділі "Накладні".`);
+    return;
+  }
+
+  if (candidates.length === 1) {
+    const { inv } = candidates[0];
+    await markInvoicePaid(inv, result.date || undefined);
+    await reply(chatId,
+      `✅ Чек на ${result.amount.toFixed(2)} ₴ прив'язано до накладної:\n` +
+      `Постачальник: ${inv.supplier}\nДата: ${inv.date}\nСума: ${inv.total.toFixed(2)} ₴`);
+    return;
+  }
+
+  await tg('sendMessage', {
+    chat_id: chatId,
+    text: `💳 Чек на ${result.amount.toFixed(2)} ₴ підходить до кількох накладних — оберіть потрібну:`,
+    reply_markup: {
+      inline_keyboard: candidates.slice(0, 8).map(({ inv }) => ([{
+        text: `${inv.supplier} — ${inv.date} — ${inv.total.toFixed(2)} ₴`,
+        callback_data: `recv:${inv.id}`
+      }]))
+    }
+  });
 }
 
 router.post('/telegram/webhook', async (req, res) => {
@@ -119,14 +196,23 @@ router.post('/telegram/webhook', async (req, res) => {
     }
 
     if (!message.photo || !message.photo.length) {
-      await reply(chatId, 'Надішліть фото накладної — я розпізнаю і додам її на перевірку.');
+      await reply(chatId, sender.role === 'accountant'
+        ? 'Надішліть фото чека про оплату — я знайду відповідну накладну за сумою боргу.'
+        : 'Надішліть фото накладної — я розпізнаю і додам її на перевірку.');
+      return res.sendStatus(200);
+    }
+
+    const largest = message.photo[message.photo.length - 1];
+    const base64 = await downloadPhotoBase64(largest.file_id);
+
+    // бухгалтер sends payment receipts, not invoices — completely different document and flow.
+    if (sender.role === 'accountant') {
+      await reply(chatId, '📷 Отримав чек, шукаю відповідну накладну...');
+      await handleReceiptPhoto(chatId, base64);
       return res.sendStatus(200);
     }
 
     await reply(chatId, '📷 Отримав, розпізнаю накладну...');
-
-    const largest = message.photo[message.photo.length - 1];
-    const base64 = await downloadPhotoBase64(largest.file_id);
     const result = await recognizeInvoiceImage(base64, 'image/jpeg');
 
     const suppliers = await readJSON('suppliers.json', []);

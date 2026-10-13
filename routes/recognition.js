@@ -227,6 +227,45 @@ async function recognizeInvoiceImage(imageBase64, mimeType) {
   return { items: mapped, count: mapped.length, supplier, date: aiDate, warning };
 }
 
+// Payment receipt (чек/квитанція про оплату) — a completely different document shape from an
+// invoice: just an amount, a date, and who it was paid to. Used by the Telegram bot's
+// бухгалтер-role flow to match a receipt against outstanding invoice debt.
+async function recognizeReceiptImage(imageBase64, mimeType) {
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o",
+    max_tokens: 500,
+    messages: [{
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: `Extract payment confirmation data from this receipt/квитанція (bank transfer receipt, cash receipt, or similar) image.
+Return ONLY a valid JSON object, no markdown, no explanation.
+Format: { "amount": number (the paid amount, 0 if not visible), "date": "YYYY-MM-DD or empty string if not visible", "recipient": "name of the recipient/payee (supplier/company being paid), or empty string if not visible" }`
+        },
+        { type: "image_url", image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: "high" } }
+      ]
+    }]
+  });
+
+  const rawText = response.choices?.[0]?.message?.content || '';
+  const cleaned = rawText.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+
+  let parsed;
+  try { parsed = JSON.parse(cleaned); }
+  catch (e) {
+    const err = new Error('AI returned invalid JSON');
+    err.raw = rawText;
+    throw err;
+  }
+
+  return {
+    amount: Number(parsed.amount) || 0,
+    date: (parsed.date || '').trim(),
+    recipient: (parsed.recipient || '').trim()
+  };
+}
+
 // =====================
 // UPLOAD + AI PARSING
 // =====================
@@ -336,3 +375,4 @@ router.post('/export', async (req, res) => {
 
 module.exports = router;
 module.exports.recognizeInvoiceImage = recognizeInvoiceImage;
+module.exports.recognizeReceiptImage = recognizeReceiptImage;
