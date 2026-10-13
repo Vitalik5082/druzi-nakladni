@@ -140,6 +140,28 @@ async function loadProducts() {
   } catch { allProducts = []; }
 }
 
+let allSuppliers = [];
+async function loadSuppliers() {
+  try {
+    const res = await authFetch('/api/suppliers');
+    allSuppliers = await res.json();
+  } catch { allSuppliers = []; }
+}
+
+async function changeInvoiceSupplier(id, supplier) {
+  try {
+    const res = await authFetch(`/api/invoices/${id}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ supplier })
+    });
+    if (!res.ok) throw new Error();
+    showToast('✓ Постачальника змінено', 'success');
+    loadInvoices();
+  } catch {
+    showToast('Помилка збереження', 'error');
+  }
+}
+
 async function loadInvoices() {
   const params = new URLSearchParams();
   const status = document.getElementById('filterStatus').value;
@@ -223,6 +245,11 @@ function renderInvoiceRow(inv) {
         <span class="inv-chevron" style="display:inline-block;transition:transform .15s;color:var(--text3)">▸</span>
         <span>${inv.date}</span>
         <span>${inv.items.filter(i=>!i.skipped).length} позицій</span>
+        <select onclick="event.stopPropagation()" onchange="event.stopPropagation(); changeInvoiceSupplier(${inv.id}, this.value)"
+          style="${inv.supplier ? '' : 'border-color:var(--danger);color:var(--danger)'}">
+          <option value="">— без постачальника —</option>
+          ${allSuppliers.map(s => `<option value="${escAttr(s.name)}" ${s.name === inv.supplier ? 'selected' : ''}>${escHtml(s.name)}</option>`).join('')}
+        </select>
       </div>
       <div class="inv-meta">
         <span class="total-cell">${(inv.total||0).toFixed(2)} ₴ <span style="color:var(--text3);font-weight:400">(з ПДВ ${(inv.total_with_vat || inv.total*1.2).toFixed(2)} ₴)</span></span>
@@ -514,8 +541,10 @@ document.getElementById('matchModal').addEventListener('click', e => {
   if (e.target === e.currentTarget) closeModal();
 });
 
-loadInvoices();
-loadProducts();
+(async () => {
+  await Promise.all([loadProducts(), loadSuppliers()]);
+  await loadInvoices();
+})();
 </script>
 </body>
 </html>
