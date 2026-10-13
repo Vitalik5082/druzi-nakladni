@@ -1,15 +1,18 @@
 // Telegram webhook — waiters photograph накладні, bot OCRs them (same pipeline as the website's
-// upload) and files a pending-review invoice. Mounted BEFORE the Supabase-auth middleware in
-// index.js since Telegram can't send a Bearer token; authenticity is instead checked via the
-// secret_token Telegram echoes back in a header (set once via setWebhook).
+// upload) and files a pending-review invoice, then asks (inline buttons) whether it was already
+// paid. Mounted BEFORE the Supabase-auth middleware in index.js since Telegram can't send a
+// Bearer token; authenticity is instead checked via the secret_token Telegram echoes back in a
+// header (set once via setWebhook).
 const express = require('express');
 const { readJSON } = require('../lib/store');
 const { normalize } = require('../lib/convert');
+const { localDateStr } = require('../lib/poster');
 const { recognizeInvoiceImage } = require('./recognition');
-const { createInvoice } = require('./invoices');
+const { createInvoice, updateInvoice } = require('./invoices');
 
 const router = express.Router();
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const FILE = 'invoices.json';
 
 async function tg(method, params) {
   const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
@@ -21,7 +24,7 @@ async function tg(method, params) {
 }
 
 async function reply(chatId, text) {
-  try { await tg('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML' }); }
+  try { return await tg('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML' }); }
   catch (e) { console.error('Telegram reply failed:', e); }
 }
 
@@ -31,6 +34,19 @@ async function downloadPhotoBase64(fileId) {
   const res = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${fileInfo.result.file_path}`);
   const buf = Buffer.from(await res.arrayBuffer());
   return buf.toString('base64');
+}
+
+async function askPaymentStatus(chatId, invoiceId) {
+  try {
+    await tg('sendMessage', {
+      chat_id: chatId,
+      text: '💳 Ця накладна вже оплачена?',
+      reply_markup: { inline_keyboard: [[
+        { text: '✅ Так, оплачено', callback_data: `pay:yes:${invoiceId}` },
+        { text: '❌ Ні, в борг', callback_data: `pay:no:${invoiceId}` }
+      ]] }
+    });
+  } catch (e) { console.error('Telegram reply failed:', e); }
 }
 
 // Fuzzy-ish: exact normalized match first, then substring either direction (OCR'd supplier names
@@ -45,10 +61,47 @@ function findSupplier(suppliers, guessName) {
   return match || null;
 }
 
+async function handleCallback(callbackQuery) {
+  const chatId = String(callbackQuery.message.chat.id);
+  const messageId = callbackQuery.message.message_id;
+  const data = callbackQuery.data || '';
+  const [, action, idStr] = data.match(/^pay:(yes|no):(\d+)$/) || [];
+
+  if (!action) { await tg('answerCallbackQuery', { callback_query_id: callbackQuery.id }); return; }
+
+  const invoices = await readJSON(FILE, []);
+  const invoice = invoices.find(inv => inv.id === Number(idStr));
+  if (!invoice) {
+    await tg('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Накладну не знайдено' });
+    return;
+  }
+
+  if (action === 'yes') {
+    await updateInvoice(invoice.id, { paidAmount: invoice.total, paidDate: localDateStr() });
+    await tg('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Позначено як оплачено' });
+    await tg('editMessageText', {
+      chat_id: chatId, message_id: messageId,
+      text: `✅ Оплачено (${invoice.total.toFixed(2)} ₴, ${localDateStr()})`
+    });
+  } else {
+    await tg('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Записано як борг' });
+    await tg('editMessageText', {
+      chat_id: chatId, message_id: messageId,
+      text: `📝 Записано як борг (${invoice.total.toFixed(2)} ₴)`
+    });
+  }
+}
+
 router.post('/telegram/webhook', async (req, res) => {
   const secret = req.headers['x-telegram-bot-api-secret-token'];
   if (process.env.TELEGRAM_WEBHOOK_SECRET && secret !== process.env.TELEGRAM_WEBHOOK_SECRET) {
     return res.sendStatus(401);
+  }
+
+  if (req.body && req.body.callback_query) {
+    try { await handleCallback(req.body.callback_query); }
+    catch (err) { console.error('Telegram callback error:', err); }
+    return res.sendStatus(200);
   }
 
   const message = req.body && req.body.message;
@@ -100,6 +153,8 @@ router.post('/telegram/webhook', async (req, res) => {
     await reply(chatId,
       `✅ Накладну додано на перевірку!\nПостачальник: ${inv.supplier}\nДата: ${inv.date}\n` +
       `Сума: ${inv.total.toFixed(2)} ₴${result.warning ? '\n\n⚠️ ' + result.warning : ''}`);
+
+    await askPaymentStatus(chatId, inv.id);
 
     // telegramInvoicesAllowed on the matched supplier decides who else gets notified right away:
     // checked → everyone (incl. бухгалтер); unchecked/unmatched → admins only, for manual triage.

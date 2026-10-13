@@ -126,12 +126,12 @@ router.post('/invoices', async (req, res) => {
   }
 });
 
-router.patch('/invoices/:id', async (req, res) => {
+// Shared by the website's PATCH /invoices/:id AND the Telegram bot's payment-status buttons.
+async function updateInvoice(id, { paidAmount, paidDate, dueDate, supplier, date, pendingReview }) {
   const invoices = await readJSON(FILE, []);
-  const invoice = invoices.find(inv => inv.id === Number(req.params.id));
-  if (!invoice) return res.status(404).json({ error: 'Not found' });
+  const invoice = invoices.find(inv => inv.id === Number(id));
+  if (!invoice) return null;
 
-  const { paidAmount, paidDate, dueDate, supplier, date, pendingReview } = req.body;
   if (paidAmount !== undefined) invoice.paidAmount = Number(paidAmount) || 0;
   if (paidDate !== undefined) invoice.paidDate = paidDate;
   if (dueDate !== undefined) invoice.dueDate = dueDate;
@@ -142,7 +142,13 @@ router.patch('/invoices/:id', async (req, res) => {
   await writeJSON(FILE, invoices);
   if (supplier) await ensureSupplier(supplier);
 
-  res.json({ ...invoice, status: deriveStatus(invoice) });
+  return { ...invoice, status: deriveStatus(invoice) };
+}
+
+router.patch('/invoices/:id', async (req, res) => {
+  const updated = await updateInvoice(req.params.id, req.body);
+  if (!updated) return res.status(404).json({ error: 'Not found' });
+  res.json(updated);
 });
 
 router.delete('/invoices/:id', async (req, res) => {
@@ -155,3 +161,4 @@ router.delete('/invoices/:id', async (req, res) => {
 
 module.exports = router;
 module.exports.createInvoice = createInvoice;
+module.exports.updateInvoice = updateInvoice;
