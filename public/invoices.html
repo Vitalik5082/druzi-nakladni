@@ -359,6 +359,7 @@ async function confirmPay() {
 
 function editInvoiceItems(id) {
   editingInvoices.add(id);
+  openInvoices.add(id); // the item table only renders when the row is expanded — force it open
   render();
 }
 
