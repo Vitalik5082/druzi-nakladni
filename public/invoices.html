@@ -65,6 +65,8 @@
     <button class="btn" id="clearFilterBtn">Очистити</button>
   </div>
 
+  <button class="btn primary" id="newInvoiceBtn" style="margin-bottom:14px">+ Нова накладна</button>
+
   <div class="stats-row" style="grid-template-columns:repeat(3,1fr)">
     <div class="stat-card">
       <div class="stat-label">Накладних</div>
@@ -119,6 +121,48 @@
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Скасувати</button>
       <button class="btn primary" onclick="confirmMatch()">Зберегти</button>
+    </div>
+  </div>
+</div>
+
+<!-- NEW INVOICE MODAL -->
+<div class="modal-overlay" id="newInvoiceModal">
+  <div class="modal" style="max-width:720px">
+    <div class="modal-title">Нова накладна</div>
+    <div class="modal-sub">Створи накладну вручну — наприклад, якщо немає фото, або AI не впорався</div>
+    <div class="form-grid">
+      <div class="form-field">
+        <label for="newInvSupplier">Постачальник</label>
+        <select id="newInvSupplier" class="supplier-select" onchange="updateNewInvoicePriceLabel()"></select>
+      </div>
+      <div class="form-field">
+        <label for="newInvDate">Дата</label>
+        <input id="newInvDate" type="date">
+      </div>
+    </div>
+
+    <div class="table-wrap" style="margin-top:10px">
+      <table>
+        <thead>
+          <tr>
+            <th>Товар</th>
+            <th style="text-align:right">К-сть</th>
+            <th>Од.</th>
+            <th style="text-align:right" id="newInvPriceLabel">Ціна (без ПДВ)</th>
+            <th title="Не продуктовий товар — не враховується у собівартість товарів, але віднімається з прибутку як витрата">Хімія</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="newInvoiceItemsBody"></tbody>
+      </table>
+      <button class="btn sm" style="margin-top:10px" onclick="addNewInvoiceItemRow()">+ Додати позицію</button>
+    </div>
+
+    <datalist id="productsDatalist"></datalist>
+
+    <div class="modal-footer">
+      <button class="btn" onclick="closeNewInvoiceModal()">Скасувати</button>
+      <button class="btn primary" onclick="saveNewInvoice()">Зберегти накладну</button>
     </div>
   </div>
 </div>
@@ -444,6 +488,108 @@ async function toggleItemChemistry(invId, itemId, checked) {
   }
 }
 
+// ── NEW INVOICE MODAL (manual entry — no photo/OCR) ──────────────────
+let nextNewInvoiceRowId = 1;
+
+function updateNewInvoicePriceLabel() {
+  const supplierName = document.getElementById('newInvSupplier').value;
+  const supplier = allSuppliers.find(s => s.name === supplierName);
+  document.getElementById('newInvPriceLabel').textContent = supplier && supplier.pricesIncludeVat ? 'Ціна (з ПДВ)' : 'Ціна (без ПДВ)';
+}
+
+function addNewInvoiceItemRow() {
+  const tbody = document.getElementById('newInvoiceItemsBody');
+  const id = nextNewInvoiceRowId++;
+  const tr = document.createElement('tr');
+  tr.dataset.rowId = id;
+  tr.innerHTML = `
+    <td><input type="text" class="item-name-input modal-search" list="productsDatalist" style="margin:0;width:220px" placeholder="Назва товару"></td>
+    <td style="text-align:right"><input type="number" step="any" class="item-qty-input" style="width:80px;text-align:right" value="0"></td>
+    <td>
+      <select class="item-unit-select unit-select">
+        <option value="pcs">шт</option>
+        <option value="kg">кг</option>
+        <option value="g">г</option>
+        <option value="l">л</option>
+        <option value="ml">мл</option>
+        <option value="portion">порц</option>
+      </select>
+    </td>
+    <td style="text-align:right"><input type="number" step="any" class="item-price-input" style="width:90px;text-align:right" value="0"></td>
+    <td style="text-align:center"><input type="checkbox" class="item-chem-check"></td>
+    <td><button class="btn sm danger" onclick="this.closest('tr').remove()" title="Видалити позицію">✕</button></td>
+  `;
+  tbody.appendChild(tr);
+}
+
+function openNewInvoiceModal() {
+  document.getElementById('newInvSupplier').innerHTML =
+    `<option value="">— без постачальника —</option>` +
+    allSuppliers.map(s => `<option value="${escAttr(s.name)}">${escHtml(s.name)}</option>`).join('');
+  document.getElementById('newInvDate').value = new Date().toISOString().slice(0, 10);
+  document.getElementById('productsDatalist').innerHTML =
+    allProducts.map(p => `<option value="${escAttr(p)}">`).join('');
+  document.getElementById('newInvoiceItemsBody').innerHTML = '';
+  updateNewInvoicePriceLabel();
+  addNewInvoiceItemRow();
+  document.getElementById('newInvoiceModal').classList.add('open');
+}
+
+function closeNewInvoiceModal() {
+  document.getElementById('newInvoiceModal').classList.remove('open');
+}
+
+async function saveNewInvoice(force) {
+  const supplier = document.getElementById('newInvSupplier').value;
+  const date = document.getElementById('newInvDate').value;
+  if (!date) { showToast('Вкажи дату', 'error'); return; }
+
+  const rows = document.querySelectorAll('#newInvoiceItemsBody tr[data-row-id]');
+  const items = [];
+  rows.forEach((row, idx) => {
+    const name = row.querySelector('.item-name-input').value.trim();
+    const qty = parseFloat(row.querySelector('.item-qty-input').value) || 0;
+    if (!name || qty <= 0) return;
+    const unit = row.querySelector('.item-unit-select').value;
+    const price = parseFloat(row.querySelector('.item-price-input').value) || 0;
+    const isChemistry = row.querySelector('.item-chem-check').checked;
+    const matched = allProducts.some(p => p.toLowerCase() === name.toLowerCase());
+    items.push({
+      id: idx, name, original_name: name, qty, unit, price,
+      total: Number((qty * price).toFixed(2)),
+      matched, isNewProduct: !matched, skipped: false, isChemistry
+    });
+  });
+
+  if (!items.length) { showToast('Додай хоча б одну позицію (назва і кількість > 0)', 'error'); return; }
+
+  if (!force) {
+    const newProducts = items.filter(i => i.isNewProduct).map(i => i.name);
+    if (newProducts.length && !confirm(
+      `Цих товарів немає в довіднику — вони додадуться як нові:\n${newProducts.join(', ')}\n\nПродовжити?`
+    )) return;
+  }
+
+  try {
+    const res = await authFetch('/api/invoices', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ supplier, date, items, source: 'manual', force: !!force })
+    });
+    const data = await res.json();
+    if (res.status === 409) {
+      if (confirm(data.message + '\n\nВсе одно зберегти як окрему накладну?')) return saveNewInvoice(true);
+      return;
+    }
+    if (!res.ok) throw new Error(data.error);
+    closeNewInvoiceModal();
+    showToast('✓ Накладну створено', 'success');
+    loadInvoices();
+  } catch (err) {
+    showToast(err.message || 'Помилка збереження', 'error');
+  }
+}
+
 async function saveInvoiceItems(id) {
   const inv = invoices.find(i => i.id === id);
   if (!inv) return;
@@ -639,6 +785,10 @@ document.getElementById('payModal').addEventListener('click', e => {
 });
 document.getElementById('matchModal').addEventListener('click', e => {
   if (e.target === e.currentTarget) closeModal();
+});
+document.getElementById('newInvoiceBtn').addEventListener('click', openNewInvoiceModal);
+document.getElementById('newInvoiceModal').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeNewInvoiceModal();
 });
 
 (async () => {
