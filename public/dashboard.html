@@ -50,9 +50,9 @@
       <div class="stat-note" id="noteRevenue"></div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Товари (накладні)</div>
-      <div class="stat-value info" id="statGoods">0 ₴</div>
-      <div class="stat-note" id="noteGoods"></div>
+      <div class="stat-label">Собівартість проданого</div>
+      <div class="stat-value info" id="statCogs">0 ₴</div>
+      <div class="stat-note" id="noteCogs">з Poster (як і в самому Poster)</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Інші витрати</div>
@@ -63,6 +63,14 @@
       <div class="stat-label">ЗП</div>
       <div class="stat-value warn" id="statPayroll">0 ₴</div>
       <div class="stat-note" id="notePayroll"></div>
+    </div>
+  </div>
+
+  <div class="stats-row" style="grid-template-columns:repeat(1,1fr)">
+    <div class="stat-card">
+      <div class="stat-label">Закуплено по накладних (довідково)</div>
+      <div class="stat-value" id="statGoods" style="font-size:16px">0 ₴</div>
+      <div class="stat-note" id="noteGoods">Кеш-відтік постачальникам за період — НЕ входить у розрахунок прибутку (там собівартість проданого вище)</div>
     </div>
   </div>
 
@@ -137,8 +145,10 @@ async function loadDashboard() {
     document.getElementById('statRevenue').textContent = fmt(data.revenue);
     document.getElementById('noteRevenue').textContent = `${data.cashDaysCount} дн. каси`;
 
+    document.getElementById('statCogs').textContent = fmt(data.cogs);
+    document.getElementById('noteCogs').textContent = `з Poster (${data.salesDaysCount} дн. продажів синхронізовано)`;
+
     document.getElementById('statGoods').textContent = fmt(data.goods);
-    document.getElementById('noteGoods').textContent = `${data.invoicesCount} накладних`;
 
     document.getElementById('statExpenses').textContent = fmt(data.otherExpenses);
     document.getElementById('noteExpenses').textContent = `${data.expensesCount} записів`;
