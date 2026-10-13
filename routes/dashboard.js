@@ -49,11 +49,26 @@ router.get('/dashboard', async (req, res) => {
   const cogs = Number((salesGross - salesProfit).toFixed(2));
 
   const revenue = cashDays.reduce((s, d) => s + (d.revenue || 0), 0);
-  const goods = invoices.reduce((s, i) => s + (i.total || 0), 0);
+
+  // "Хімія" items (cleaning supplies, packaging, batteries, small repairs etc.) tagged inside a
+  // накладна aren't food/drink goods — they shouldn't count toward the product-purchase total or
+  // COGS, but they ARE a real expense that reduces profit. Split them out of "goods" here instead
+  // of using invoice.total directly, which would still lump them in.
+  let goods = 0, chemistryCost = 0;
+  for (const inv of invoices) {
+    for (const item of inv.items || []) {
+      if (item.skipped) continue;
+      if (item.isChemistry) chemistryCost += item.total || 0;
+      else goods += item.total || 0;
+    }
+  }
+  chemistryCost = Number(chemistryCost.toFixed(2));
+  goods = Number(goods.toFixed(2));
+
   const otherExpensesManual = expenses.reduce((s, e) => s + (e.amount || 0), 0);
   const payrollManual = payroll.reduce((s, p) => s + (p.amount || 0), 0);
 
-  const otherExpenses = otherExpensesManual + otherExpensesFromPoster;
+  const otherExpenses = Number((otherExpensesManual + otherExpensesFromPoster + chemistryCost).toFixed(2));
   const payrollTotal = payrollManual + payrollFromPoster;
 
   // Адмін отримує % від виручки — рахується окремо від іншої ЗП, щоб завжди бути видимим,
@@ -72,7 +87,7 @@ router.get('/dashboard', async (req, res) => {
     revenue, cogs, goods, otherExpenses, payroll: payrollTotal,
     profit: profitBeforeAdmin, foodCostPct,
     adminSalary, adminPct, profitBeforeAdmin, profitAfterAdmin,
-    payrollManual, payrollFromPoster, otherExpensesManual, otherExpensesFromPoster,
+    payrollManual, payrollFromPoster, otherExpensesManual, otherExpensesFromPoster, chemistryCost,
     cashDaysCount: cashDays.length, invoicesCount: invoices.length,
     expensesCount: expenses.length, payrollEntriesCount: payroll.length,
     salesDaysCount: salesDates.length

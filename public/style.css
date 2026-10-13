@@ -116,8 +116,10 @@ nav.main-nav {
   gap: 1px;
 }
 .nav-dropdown:hover .nav-panel,
-.nav-dropdown:focus-within .nav-panel { display: flex; }
-.nav-dropdown:hover .nav-caret { transform: rotate(180deg); }
+.nav-dropdown:focus-within .nav-panel,
+.nav-dropdown.open .nav-panel { display: flex; }
+.nav-dropdown:hover .nav-caret,
+.nav-dropdown.open .nav-caret { transform: rotate(180deg); }
 
 .nav-panel a {
   display: block;
@@ -399,6 +401,9 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
 .unit-badge.kg { border-color: rgba(91,141,255,.3); color: var(--info); }
 .unit-badge.l { border-color: rgba(91,141,255,.3); color: var(--info); }
 .unit-badge.ml { border-color: rgba(91,200,255,.3); color: #5bc8ff; }
+
+.chemistry-row { background: rgba(255,179,64,.06); }
+.chemistry-row:hover { background: rgba(255,179,64,.1); }
 
 .status-badge {
   display: inline-block;

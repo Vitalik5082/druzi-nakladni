@@ -275,12 +275,13 @@ function renderInvoiceRow(inv) {
               <th style="text-align:right">Ціна (без ПДВ)</th>
               <th style="text-align:right">Ціна (з ПДВ)</th>
               <th style="text-align:right">Сума (з ПДВ)</th>
+              <th title="Не продуктовий товар (засоби, пакування, дрібний ремонт тощо) — не враховується у собівартість товарів, але віднімається з прибутку як витрата">Хімія</th>
               <th></th>
             </tr>
           </thead>
           <tbody id="itemsBody-${inv.id}">
             ${inv.items.filter(i => !i.skipped).map(i => `
-              <tr data-item-id="${i.id}">
+              <tr data-item-id="${i.id}" class="${i.isChemistry ? 'chemistry-row' : ''}">
                 <td>
                   <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
                     <span>${escHtml(i.name)}</span>
@@ -297,6 +298,11 @@ function renderInvoiceRow(inv) {
                   : (i.price||0).toFixed(2) + ' ₴'}</td>
                 <td style="text-align:right" class="item-price-vat-cell">${(i.price_with_vat || i.price*1.2 || 0).toFixed(2)} ₴</td>
                 <td style="text-align:right" class="total-cell item-total-cell">${(i.total_with_vat || i.total*1.2 || 0).toFixed(2)} ₴</td>
+                <td style="text-align:center">
+                  <input type="checkbox" class="item-chem-check" ${i.isChemistry ? 'checked' : ''}
+                    onclick="event.stopPropagation()"
+                    onchange="toggleItemChemistry(${inv.id}, ${i.id}, this.checked)">
+                </td>
                 <td style="white-space:nowrap">
                   <button class="btn sm" onclick="event.stopPropagation(); openMatchModal(${inv.id}, ${i.id})" title="Змінити відповідність товару">✎</button>
                   ${isEditing ? `<button class="btn sm danger" onclick="event.stopPropagation(); deleteItemRow(${inv.id}, ${i.id})" title="Видалити позицію">✕</button>` : ''}
@@ -410,9 +416,32 @@ function addItemRow(invId) {
     <td style="text-align:right"><input type="number" step="any" class="item-price-input" style="width:90px;text-align:right" value="0" oninput="recalcItemRow(${invId}, ${id})"></td>
     <td style="text-align:right" class="item-price-vat-cell">0.00 ₴</td>
     <td style="text-align:right" class="total-cell item-total-cell">0.00 ₴</td>
+    <td style="text-align:center"><input type="checkbox" class="item-chem-check" onclick="event.stopPropagation()"></td>
     <td><button class="btn sm danger" onclick="deleteItemRow(${invId}, ${id})" title="Видалити позицію">✕</button></td>
   `;
   tbody.appendChild(tr);
+}
+
+// Quick-toggle outside of edit mode — doesn't touch qty/price, just flips the one flag and saves
+// immediately (updateInvoice recomputes totals off the item's own existing qty/price, a no-op).
+async function toggleItemChemistry(invId, itemId, checked) {
+  const inv = invoices.find(i => i.id === invId);
+  if (!inv) return;
+  const items = inv.items.map(it => it.id === itemId ? { ...it, isChemistry: checked } : it);
+  try {
+    const res = await authFetch(`/api/invoices/${invId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items })
+    });
+    if (!res.ok) throw new Error();
+    const updated = await res.json();
+    Object.assign(inv, updated);
+    render();
+    showToast(checked ? '✓ Позначено як хімія (не продукт)' : '✓ Знято позначку', 'success');
+  } catch {
+    showToast('Помилка збереження', 'error');
+  }
 }
 
 async function saveInvoiceItems(id) {
@@ -427,6 +456,7 @@ async function saveInvoiceItems(id) {
     const itemId = Number(row.dataset.itemId);
     const qty = parseFloat(row.querySelector('.item-qty-input').value) || 0;
     const price = parseFloat(row.querySelector('.item-price-input').value) || 0;
+    const isChemistry = row.querySelector('.item-chem-check').checked;
 
     if (row.dataset.newItem === '1') {
       const name = row.querySelector('.item-name-input').value.trim();
@@ -434,7 +464,7 @@ async function saveInvoiceItems(id) {
       if (name) {
         newItems.push({
           id: itemId, name, original_name: name, qty, unit, price,
-          matched: true, isNewProduct: false, skipped: false
+          matched: true, isNewProduct: false, skipped: false, isChemistry
         });
       }
     } else {
@@ -453,7 +483,8 @@ async function saveInvoiceItems(id) {
       const row = document.querySelector(`#itemsBody-${id} tr[data-item-id="${item.id}"]`);
       const qty = parseFloat(row.querySelector('.item-qty-input').value) || 0;
       const price = parseFloat(row.querySelector('.item-price-input').value) || 0;
-      return { ...item, qty, price };
+      const isChemistry = row.querySelector('.item-chem-check').checked;
+      return { ...item, qty, price, isChemistry };
     });
 
   // originally-skipped items never rendered in the table at all — carry them through untouched

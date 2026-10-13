@@ -58,6 +58,7 @@
       <div class="stat-label">Інші витрати</div>
       <div class="stat-value warn" id="statExpenses">0 ₴</div>
       <div class="stat-note"><a href="#" id="toggleExpensesLink" onclick="toggleExpensesList(); return false" style="color:var(--text3);text-decoration:underline">—</a></div>
+      <div class="stat-note" id="noteChemistry"></div>
     </div>
     <div class="stat-card">
       <div class="stat-label">ЗП</div>
@@ -72,7 +73,7 @@
     <div class="stat-card">
       <div class="stat-label">Закуплено по накладних (довідково)</div>
       <div class="stat-value" id="statGoods" style="font-size:16px">0 ₴</div>
-      <div class="stat-note" id="noteGoods">Кеш-відтік постачальникам за період — НЕ входить у розрахунок прибутку (там собівартість проданого вище)</div>
+      <div class="stat-note" id="noteGoods">Кеш-відтік постачальникам за період (без хімії/не-продуктів — ті пораховані як витрата) — НЕ входить у розрахунок прибутку (там собівартість проданого вище)</div>
     </div>
   </div>
 
@@ -196,6 +197,8 @@ async function loadDashboard() {
 
     document.getElementById('statExpenses').textContent = fmt(data.otherExpenses);
     document.getElementById('toggleExpensesLink').textContent = `${data.expensesCount} записів — показати`;
+    document.getElementById('noteChemistry').textContent =
+      data.chemistryCost ? `у т.ч. хімія/не-продукти з накладних: ${fmt(data.chemistryCost)}` : '';
     document.getElementById('expensesListWrap').style.display = 'none';
     document.getElementById('expensesListWrap').innerHTML = '';
     currentFrom = from; currentTo = to;

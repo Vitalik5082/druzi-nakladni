@@ -64,7 +64,7 @@ function renderNav(active) {
 
     return `
       <div class="nav-dropdown ${isActiveGroup ? 'active' : ''}">
-        <span class="nav-top">${group.label} <span class="nav-caret">▾</span></span>
+        <span class="nav-top" onclick="toggleNavDropdown(event, this)">${group.label} <span class="nav-caret">▾</span></span>
         <div class="nav-panel"><div class="nav-panel-inner">${links}</div></div>
       </div>`;
   }).join('');
@@ -80,6 +80,21 @@ function renderNav(active) {
     </header>
   `;
 }
+
+// Dropdowns open on :hover/:focus-within in CSS, which desktop mice get for free — but there's
+// no hover state on a touchscreen and the trigger (a <span>) isn't focusable, so on mobile tapping
+// a nav group did nothing. This adds an explicit tap-to-toggle that works alongside the CSS hover.
+function toggleNavDropdown(event, el) {
+  event.stopPropagation();
+  const dropdown = el.closest('.nav-dropdown');
+  const wasOpen = dropdown.classList.contains('open');
+  document.querySelectorAll('.nav-dropdown.open').forEach(d => d.classList.remove('open'));
+  if (!wasOpen) dropdown.classList.add('open');
+}
+
+document.addEventListener('click', () => {
+  document.querySelectorAll('.nav-dropdown.open').forEach(d => d.classList.remove('open'));
+});
 
 function logout() {
   clearToken();

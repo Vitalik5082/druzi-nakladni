@@ -6,7 +6,8 @@ const router = express.Router();
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const SYSTEM_PROMPT = `Ти — асистент власника кафе/бару. Відповідай українською, коротко і по суті, конкретними цифрами з інструментів.
-Якщо дані для відповіді відсутні (не синхронізовано), скажи прямо що саме треба синхронізувати (сторінки "Реалізація"/"Техкарти"/"Залишки"), не вигадуй цифри.
+Для будь-якого питання про виручку, собівартість, витрати, ЗП, прибуток, рентабельність чи точку беззбитковості — ЗАВЖДИ викликай get_financial_summary, а не рахуй і не вигадуй цифри сам.
+Якщо дані для відповіді відсутні (не синхронізовано), скажи прямо що саме треба синхронізувати (сторінки "Каса"/"Реалізація"/"Техкарти"/"Залишки"), не вигадуй цифри.
 Сьогоднішня дата: ${new Date().toISOString().slice(0, 10)}.`;
 
 const TOOLS = [
@@ -50,6 +51,21 @@ const TOOLS = [
         properties: {
           days: { type: 'number', description: 'За скільки останніх днів рахувати (за замовчуванням 30)' },
           limit: { type: 'number', description: 'Скільки позицій повернути з кожного краю (за замовчуванням 10)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_financial_summary',
+      description: 'Фінансовий підсумок за період: виручка (каса), собівартість проданого (COGS, з Poster), інші витрати (оренда/комуналка/податки/хімія тощо — манулальні + з Poster), ЗП (ручна + з Poster), ЗП адміна (% від виручки), прибуток до і після ЗП адміна, фудкост %, і розрахована середньоденна точка беззбитковості (виручка за день, нижче якої день стає збитковим). Використовуй для БУДЬ-ЯКОГО питання про прибуток, витрати, ЗП, рентабельність чи беззбитковість — ніколи не рахуй ці цифри сам.',
+      parameters: {
+        type: 'object',
+        properties: {
+          days: { type: 'number', description: 'За скільки останніх днів (за замовчуванням 30)' },
+          dateFrom: { type: 'string', description: 'Початок періоду YYYY-MM-DD (альтернатива days)' },
+          dateTo: { type: 'string', description: 'Кінець періоду YYYY-MM-DD' }
         }
       }
     }
@@ -229,6 +245,99 @@ async function executeTool(name, args) {
       leastProfitable: results.slice(0, limit),
       mostProfitable: results.slice(-limit).reverse(),
       note: 'Собівартість рахується з техкарт і поточних цін інгредієнтів Poster — може не відображати найсвіжіші закупівельні ціни.'
+    };
+  }
+
+  if (name === 'get_financial_summary') {
+    let from, to;
+    if (args.dateFrom && args.dateTo) {
+      from = args.dateFrom; to = args.dateTo;
+    } else {
+      const dates = lastNDates(args.days || 30);
+      to = dates[0];
+      from = dates[dates.length - 1];
+    }
+
+    const [cashDaysAll, invoicesAll, expensesAll, payrollAll, posterFinance, employees, posterSales] = await Promise.all([
+      readJSON('cashdays.json', []),
+      readJSON('invoices.json', []),
+      readJSON('expenses.json', []),
+      readJSON('payroll.json', []),
+      readJSON('posterFinance.json', {}),
+      readJSON('employees.json', []),
+      readJSON('posterSales.json', {})
+    ]);
+
+    const cashDays = cashDaysAll.filter(d => d.date >= from && d.date <= to);
+    if (!cashDays.length) {
+      return { from, to, error: 'Немає даних каси (виручки) за цей період — потрібно внести дні в розділі "Каса".' };
+    }
+
+    const invoices = invoicesAll.filter(i => i.date >= from && i.date <= to);
+    const expenses = expensesAll.filter(e => e.date >= from && e.date <= to);
+    const payroll = payrollAll.filter(p => p.date >= from && p.date <= to);
+
+    // mirror of routes/dashboard.js — kept as a self-contained copy rather than imported, same as
+    // the other chat tools above
+    const financeDates = Object.keys(posterFinance).filter(d => d >= from && d <= to);
+    let payrollFromPoster = 0, otherExpensesFromPoster = 0;
+    for (const date of financeDates) {
+      for (const t of posterFinance[date]) {
+        if (t.category_id === 6) payrollFromPoster += t.amount;
+        else otherExpensesFromPoster += t.amount;
+      }
+    }
+
+    const salesDates = Object.keys(posterSales).filter(d => d >= from && d <= to);
+    let salesGross = 0, salesProfit = 0;
+    for (const date of salesDates) {
+      for (const item of posterSales[date] || []) {
+        salesGross += item.grossSum || 0;
+        salesProfit += item.profit || 0;
+      }
+    }
+    const cogs = Number((salesGross - salesProfit).toFixed(2));
+
+    const revenue = cashDays.reduce((s, d) => s + (d.revenue || 0), 0);
+
+    let chemistryCost = 0;
+    for (const inv of invoices) {
+      for (const item of inv.items || []) {
+        if (!item.skipped && item.isChemistry) chemistryCost += item.total || 0;
+      }
+    }
+
+    const otherExpensesManual = expenses.reduce((s, e) => s + (e.amount || 0), 0);
+    const payrollManual = payroll.reduce((s, p) => s + (p.amount || 0), 0);
+    const otherExpenses = Number((otherExpensesManual + otherExpensesFromPoster + chemistryCost).toFixed(2));
+    const payrollTotal = payrollManual + payrollFromPoster;
+
+    const adminPct = employees.filter(e => e.payType === 'percent_of_revenue').reduce((s, e) => s + (Number(e.percent) || 0), 0);
+    const adminSalary = Number((revenue * adminPct / 100).toFixed(2));
+
+    const profitBeforeAdmin = Number((revenue - cogs - otherExpenses - payrollTotal).toFixed(2));
+    const profitAfterAdmin = Number((profitBeforeAdmin - adminSalary).toFixed(2));
+    const foodCostPct = revenue > 0 ? Number((cogs / revenue * 100).toFixed(1)) : null;
+
+    // Break-even: COGS and admin salary scale with revenue (both are ~% of revenue), everything
+    // else (payroll, rent, utilities, taxes, chemistry...) is treated as fixed per day, averaged
+    // over the period. profit(R) = R*(1 - foodCost% - adminPct%) - fixedPerDay = 0 solved for R.
+    const daysCount = cashDays.length;
+    const avgRevenuePerDay = Number((revenue / daysCount).toFixed(2));
+    const avgFixedCostPerDay = Number(((otherExpenses + payrollTotal) / daysCount).toFixed(2));
+    const variableRateFraction = (foodCostPct || 0) / 100 + adminPct / 100;
+    const breakevenRevenuePerDay = variableRateFraction < 1
+      ? Number((avgFixedCostPerDay / (1 - variableRateFraction)).toFixed(2))
+      : null;
+
+    return {
+      from, to, daysWithCashData: daysCount,
+      revenue, cogs, foodCostPct, otherExpenses, payroll: payrollTotal,
+      adminPct, adminSalary, profitBeforeAdmin, profitAfterAdmin,
+      avgRevenuePerDay, avgFixedCostPerDay, breakevenRevenuePerDay,
+      note: breakevenRevenuePerDay === null
+        ? 'Неможливо порахувати точку беззбитковості: собівартість% + ЗП адміна% від виручки разом ≥100%.'
+        : `Точка беззбитковості ≈ ${breakevenRevenuePerDay} ₴ виручки/день: середні фіксовані щоденні витрати (ЗП персоналу + оренда/комуналка/податки/хімія/інше) за цей період — ${avgFixedCostPerDay} ₴/день, а собівартість (${foodCostPct}% виручки) і ЗП адміна (${adminPct}% виручки) масштабуються з виручкою. Нижче цієї виручки за день — збиток.`
     };
   }
 
