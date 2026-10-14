@@ -8,7 +8,7 @@ const Fuse = require('fuse.js');
 const { readJSON, writeJSON, nextId } = require('../lib/store');
 const { normalize } = require('../lib/convert');
 const { localDateStr, posterCall, createPosterSupply, posterDateTimeStr } = require('../lib/poster');
-const { recognizeInvoiceImage, recognizeReceiptImage, recognizeStockText } = require('./recognition');
+const { recognizeInvoiceImage, recognizeReceiptImage, recognizeStockText, recognizeExpenseText } = require('./recognition');
 const { createInvoice, updateInvoice } = require('./invoices');
 
 const router = express.Router();
@@ -18,6 +18,11 @@ const FILE = 'invoices.json';
 // whose ingredient has no (or an ambiguous) supplier assignment in "Постачальники товарів" —
 // supplier_id 4 in this Poster account ("Telegram-прихід (без визначеного постачальника)").
 const FALLBACK_SUPPLIER_ID = 4;
+// Keep in sync with public/expenses.html's category <option> list.
+const EXPENSE_CATEGORIES = [
+  'Оренда', 'Комуналка', 'Інтернет', 'Податки', 'Сміття', 'Підписки',
+  'Хімія', 'Пакування', 'Маркетинг', 'Ремонт', 'Інше'
+];
 
 async function tg(method, params) {
   const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
@@ -328,6 +333,53 @@ async function handleStockText(chatId, text, submittedByLabel, recipients) {
   }
 }
 
+// Бухгалтер's reply to the 15th-of-month reminder (scripts/monthly-accountant-reminder.js) —
+// "Податки: 10грн, Комуналка: 10грн" or similar free text. The target month was fixed by that
+// reminder (pendingAccountantReport.json), not derived from whenever she actually replies, since
+// she might answer hours or days later. Creates one expenses.json entry per recognized category.
+async function handleAccountantExpenseText(chatId, text, month) {
+  await reply(chatId, '📝 Записую витрати...');
+
+  let parsed;
+  try {
+    parsed = await recognizeExpenseText(text, EXPENSE_CATEGORIES);
+  } catch (e) {
+    await reply(chatId, '⚠️ Не вдалось розпізнати текст. Спробуйте, наприклад: "Податки: 10000грн, Комуналка: 8000грн".');
+    return;
+  }
+
+  if (!parsed.items.length) {
+    await reply(chatId, '⚠️ Не знайшов жодної суми у повідомленні. Спробуйте, наприклад: "Податки: 10000грн".');
+    return;
+  }
+
+  const date = `${month}-01`;
+  const expenses = await readJSON('expenses.json', []);
+  const created = [];
+  for (const item of parsed.items) {
+    const expense = {
+      id: nextId(expenses),
+      date,
+      category: item.category,
+      description: `Звіт бухгалтера за ${month} (через бот)`,
+      amount: item.amount
+    };
+    expenses.push(expense);
+    created.push(expense);
+  }
+  await writeJSON('expenses.json', expenses);
+
+  await reply(chatId,
+    `✅ Записано за ${month}:\n${created.map(e => `${e.category}: ${e.amount.toFixed(2)} ₴`).join('\n')}`);
+
+  const recipients = await readJSON('telegramRecipients.json', []);
+  const toNotify = recipients.filter(r => r.role === 'admin' && String(r.chatId) !== chatId);
+  for (const r of toNotify) {
+    await reply(r.chatId,
+      `💸 Бухгалтер записала витрати за ${month}:\n${created.map(e => `${e.category}: ${e.amount.toFixed(2)} ₴`).join('\n')}`);
+  }
+}
+
 router.post('/telegram/webhook', async (req, res) => {
   const secret = req.headers['x-telegram-bot-api-secret-token'];
   if (process.env.TELEGRAM_WEBHOOK_SECRET && secret !== process.env.TELEGRAM_WEBHOOK_SECRET) {
@@ -375,6 +427,16 @@ router.post('/telegram/webhook', async (req, res) => {
       if (sender.role === 'waiter' && message.text && message.text.trim() && !message.text.startsWith('/')) {
         await handleStockText(chatId, message.text.trim(), submittedByLabel, recipients);
         return res.sendStatus(200);
+      }
+      if (sender.role === 'accountant' && message.text && message.text.trim() && !message.text.startsWith('/')) {
+        const pendingReport = await readJSON('pendingAccountantReport.json', {});
+        const month = pendingReport[chatId];
+        if (month) {
+          delete pendingReport[chatId];
+          await writeJSON('pendingAccountantReport.json', pendingReport);
+          await handleAccountantExpenseText(chatId, message.text.trim(), month);
+          return res.sendStatus(200);
+        }
       }
       await reply(chatId, sender.role === 'accountant'
         ? 'Надішліть фото чека про оплату — я знайду відповідну накладну за сумою боргу.'

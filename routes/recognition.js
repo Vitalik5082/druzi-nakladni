@@ -279,6 +279,45 @@ Message: """${text}"""`
   };
 }
 
+// Бухгалтер's monthly reply to the 15th-of-month reminder ("Податки: 10грн, Комуналка: 10грн") —
+// extracts {category, amount} pairs, snapping category to one of OUR known expense categories
+// (routes/expenses.js's fixed list) so the result slots straight into expenses.json without
+// creating stray new category strings from a typo or reworded label.
+async function recognizeExpenseText(text, categories) {
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o",
+    max_tokens: 300,
+    messages: [{
+      role: "user",
+      content: `A bookkeeper is reporting expense amounts paid, in free-form Ukrainian text, no fixed format.
+Extract every (category, amount) pair you can find. Match each item's category to the CLOSEST one from this
+exact list (use the exact spelling from the list, never invent a new category): ${categories.join(', ')}.
+If an item clearly doesn't match any category in the list, still extract it with your best-guess name.
+Return ONLY a valid JSON object, no markdown, no explanation.
+Format: { "items": [ { "category": string, "amount": number } ] }
+Message: """${text}"""`
+    }]
+  });
+
+  const rawText = response.choices?.[0]?.message?.content || '';
+  const cleaned = rawText.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+
+  let parsed;
+  try { parsed = JSON.parse(cleaned); }
+  catch (e) {
+    const err = new Error('AI returned invalid JSON');
+    err.raw = rawText;
+    throw err;
+  }
+
+  const items = Array.isArray(parsed.items) ? parsed.items : [];
+  return {
+    items: items
+      .map(i => ({ category: (i.category || '').trim(), amount: Number(i.amount) || 0 }))
+      .filter(i => i.category && i.amount > 0)
+  };
+}
+
 // Payment receipt (чек/квитанція про оплату) — a completely different document shape from an
 // invoice: just an amount, a date, and who it was paid to. Used by the Telegram bot's
 // бухгалтер-role flow to match a receipt against outstanding invoice debt.
@@ -429,3 +468,4 @@ module.exports = router;
 module.exports.recognizeInvoiceImage = recognizeInvoiceImage;
 module.exports.recognizeReceiptImage = recognizeReceiptImage;
 module.exports.recognizeStockText = recognizeStockText;
+module.exports.recognizeExpenseText = recognizeExpenseText;
