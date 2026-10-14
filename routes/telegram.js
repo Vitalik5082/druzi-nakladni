@@ -228,6 +228,16 @@ router.post('/telegram/webhook', async (req, res) => {
     const sender = recipients.find(r => String(r.chatId) === chatId);
 
     if (!sender) {
+      // No /getUpdates while the webhook is active (Telegram refuses — 409 conflict), so this is
+      // the only way to discover a new person's chat_id to register them: log it here, admin reads
+      // pendingAccess.json (or just asks for the chat_id) and adds them via telegramRecipients.json.
+      const from = message.from || {};
+      const label = from.username ? `@${from.username}` : [from.first_name, from.last_name].filter(Boolean).join(' ') || 'невідомо';
+      const pendingAccess = await readJSON('pendingAccess.json', []);
+      if (!pendingAccess.some(p => p.chatId === chatId)) {
+        pendingAccess.push({ chatId, label, firstSeen: new Date().toISOString() });
+        await writeJSON('pendingAccess.json', pendingAccess);
+      }
       await reply(chatId, 'У вас немає доступу до цього бота. Зверніться до адміністратора.');
       return res.sendStatus(200);
     }
