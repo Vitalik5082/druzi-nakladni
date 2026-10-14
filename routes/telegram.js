@@ -4,7 +4,7 @@
 // Bearer token; authenticity is instead checked via the secret_token Telegram echoes back in a
 // header (set once via setWebhook).
 const express = require('express');
-const { readJSON } = require('../lib/store');
+const { readJSON, writeJSON } = require('../lib/store');
 const { normalize } = require('../lib/convert');
 const { localDateStr } = require('../lib/poster');
 const { recognizeInvoiceImage, recognizeReceiptImage } = require('./recognition');
@@ -65,6 +65,18 @@ async function markInvoicePaid(invoice, paidDate) {
   await updateInvoice(invoice.id, { paidAmount: invoice.total, paidDate: paidDate || localDateStr() });
 }
 
+// Broadcasts a payment-status change to admin+бухгалтер so they see it without checking the site —
+// excludeChatId skips whoever's chat the action happened in (they already saw it via editMessageText).
+async function notifyStatusChange(invoice, statusText, excludeChatId) {
+  const recipients = await readJSON('telegramRecipients.json', []);
+  const toNotify = recipients.filter(r =>
+    ['admin', 'accountant'].includes(r.role) && String(r.chatId) !== String(excludeChatId));
+  for (const r of toNotify) {
+    await reply(r.chatId,
+      `🔄 Статус накладної змінено (${invoice.supplier}, ${invoice.date}, ${invoice.total.toFixed(2)} ₴):\n${statusText}`);
+  }
+}
+
 async function handleCallback(callbackQuery) {
   const chatId = String(callbackQuery.message.chat.id);
   const messageId = callbackQuery.message.message_id;
@@ -92,6 +104,7 @@ async function handleCallback(callbackQuery) {
       chat_id: chatId, message_id: messageId,
       text: `✅ Чек прив'язано до: ${invoice.supplier}, ${invoice.date}, ${invoice.total.toFixed(2)} ₴`
     });
+    await notifyStatusChange(invoice, `✅ Оплачено (чек від бухгалтера, ${invoice.total.toFixed(2)} ₴)`, chatId);
     return;
   }
 
@@ -103,12 +116,14 @@ async function handleCallback(callbackQuery) {
       chat_id: chatId, message_id: messageId,
       text: `✅ Оплачено (${invoice.total.toFixed(2)} ₴, ${localDateStr()})`
     });
+    await notifyStatusChange(invoice, `✅ Оплачено (${invoice.total.toFixed(2)} ₴)`, chatId);
   } else {
     await tg('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Записано як борг' });
     await tg('editMessageText', {
       chat_id: chatId, message_id: messageId,
       text: `📝 Записано як борг (${invoice.total.toFixed(2)} ₴)`
     });
+    await notifyStatusChange(invoice, `📝 В борг (${invoice.total.toFixed(2)} ₴)`, chatId);
   }
 }
 
@@ -154,6 +169,7 @@ async function handleReceiptPhoto(chatId, base64) {
     await reply(chatId,
       `✅ Чек на ${result.amount.toFixed(2)} ₴ прив'язано до накладної:\n` +
       `Постачальник: ${inv.supplier}\nДата: ${inv.date}\nСума: ${inv.total.toFixed(2)} ₴`);
+    await notifyStatusChange(inv, `✅ Оплачено (чек від бухгалтера, ${result.amount.toFixed(2)} ₴)`, chatId);
     return;
   }
 
@@ -167,6 +183,27 @@ async function handleReceiptPhoto(chatId, base64) {
       }]))
     }
   });
+}
+
+// Обов'язковий щоденний Z-звіт (фіскальний чек з каси) — scripts/zreport-reminder.js (Windows Task
+// Scheduler, 22:55) sets a same-day flag per waiter chat; the next photo from that chat is treated
+// as the Z-report instead of an накладна, forwarded as-is (by file_id, no re-download needed) to
+// admin+бухгалтер with the sender's name, and logged to zreports.json.
+async function handleZReportPhoto(chatId, fileId, submittedByLabel, recipients) {
+  const date = localDateStr();
+  const log = await readJSON('zreports.json', []);
+  log.push({ date, submittedBy: submittedByLabel, chatId, timestamp: new Date().toISOString() });
+  await writeJSON('zreports.json', log);
+
+  await reply(chatId, '✅ Z-звіт отримано, дякую! Гарного вечора.');
+
+  const toNotify = recipients.filter(r =>
+    ['admin', 'accountant'].includes(r.role) && String(r.chatId) !== chatId);
+  for (const r of toNotify) {
+    try {
+      await tg('sendPhoto', { chat_id: r.chatId, photo: fileId, caption: `📋 Z-звіт за ${date} від ${submittedByLabel}` });
+    } catch (e) { console.error('Z-report forward failed:', e); }
+  }
 }
 
 router.post('/telegram/webhook', async (req, res) => {
@@ -210,6 +247,17 @@ router.post('/telegram/webhook', async (req, res) => {
     }
 
     const largest = message.photo[message.photo.length - 1];
+
+    // Z-звіт takes priority over every other photo flow — only set for the rest of the evening
+    // after scripts/zreport-reminder.js pings this chat at 22:55.
+    const pendingZ = await readJSON('pendingZReport.json', {});
+    if (pendingZ[chatId] === localDateStr()) {
+      delete pendingZ[chatId];
+      await writeJSON('pendingZReport.json', pendingZ);
+      await handleZReportPhoto(chatId, largest.file_id, submittedByLabel, recipients);
+      return res.sendStatus(200);
+    }
+
     const base64 = await downloadPhotoBase64(largest.file_id);
 
     // бухгалтер sends payment receipts, not invoices — completely different document and flow.
@@ -224,7 +272,6 @@ router.post('/telegram/webhook', async (req, res) => {
 
     const suppliers = await readJSON('suppliers.json', []);
     const matchedSupplier = findSupplier(suppliers, result.supplier);
-    const forwardToAccountant = !!(matchedSupplier && matchedSupplier.telegramInvoicesAllowed);
 
     const created = await createInvoice({
       supplier: matchedSupplier ? matchedSupplier.name : (result.supplier || ''),
@@ -249,18 +296,16 @@ router.post('/telegram/webhook', async (req, res) => {
 
     await askPaymentStatus(chatId, inv.id);
 
-    // telegramInvoicesAllowed on the matched supplier decides who else gets notified right away:
-    // checked → everyone (incl. бухгалтер); unchecked/unmatched → admins only, for manual triage.
-    const notifyRoles = forwardToAccountant ? null : ['admin'];
+    // Every накладна goes to admin AND бухгалтер, always — visible sender + status, regardless of
+    // supplier config (previously gated by telegramInvoicesAllowed, which caused silent misses).
     const toNotify = recipients.filter(r =>
-      String(r.chatId) !== chatId && (!notifyRoles || notifyRoles.includes(r.role)));
+      String(r.chatId) !== chatId && ['admin', 'accountant'].includes(r.role));
 
     for (const r of toNotify) {
       await reply(r.chatId,
         `🧾 Нова накладна від ${submittedByLabel} (через бот):\n` +
         `Постачальник: ${inv.supplier}\nДата: ${inv.date}\nСума: ${inv.total.toFixed(2)} ₴\n` +
-        `Статус: на перевірці.${forwardToAccountant ? '' : ' Постачальника не позначено для автопересилки — перевірте вручну.'}\n` +
-        `Перевірте на сайті в розділі "Накладні".`);
+        `Статус: на перевірці.\nПеревірте на сайті в розділі "Накладні".`);
     }
 
     res.sendStatus(200);
