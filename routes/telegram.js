@@ -4,15 +4,20 @@
 // Bearer token; authenticity is instead checked via the secret_token Telegram echoes back in a
 // header (set once via setWebhook).
 const express = require('express');
-const { readJSON, writeJSON } = require('../lib/store');
+const Fuse = require('fuse.js');
+const { readJSON, writeJSON, nextId } = require('../lib/store');
 const { normalize } = require('../lib/convert');
-const { localDateStr } = require('../lib/poster');
-const { recognizeInvoiceImage, recognizeReceiptImage } = require('./recognition');
+const { localDateStr, posterCall, createPosterSupply, posterDateTimeStr } = require('../lib/poster');
+const { recognizeInvoiceImage, recognizeReceiptImage, recognizeStockText } = require('./recognition');
 const { createInvoice, updateInvoice } = require('./invoices');
 
 const router = express.Router();
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const FILE = 'invoices.json';
+// Poster supplier created once via storage.createSupplier specifically for text-reported receipts
+// whose ingredient has no (or an ambiguous) supplier assignment in "Постачальники товарів" —
+// supplier_id 4 in this Poster account ("Telegram-прихід (без визначеного постачальника)").
+const FALLBACK_SUPPLIER_ID = 4;
 
 async function tg(method, params) {
   const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
@@ -212,6 +217,117 @@ async function handleZReportPhoto(chatId, fileId, submittedByLabel, recipients) 
   }
 }
 
+// Free-text goods-receipt report from a waiter ("Круасан 8 шт, Булочки 50шт") — no fixed format,
+// no photo. AI extracts {name, qty, unit} triples, each matched against the LIVE Poster ingredient
+// catalog (exact normalized match, then fuzzy via Fuse.js). Matched items are grouped by whichever
+// supplier is assigned to that ingredient on "Постачальники товарів" (productSuppliers.json) and
+// pushed to Poster as a real supply document per supplier group — ambiguous/unassigned ingredients
+// fall back to FALLBACK_SUPPLIER_ID so the stock still updates, flagged in the log for manual fixup.
+async function handleStockText(chatId, text, submittedByLabel, recipients) {
+  await reply(chatId, '📝 Розпізнаю прихід...');
+
+  let parsed;
+  try {
+    parsed = await recognizeStockText(text);
+  } catch (e) {
+    await reply(chatId, '⚠️ Не вдалось розпізнати текст. Спробуйте, наприклад: "Круасан 8 шт, Булочки 50 шт".');
+    return;
+  }
+
+  if (!parsed.items.length) {
+    await reply(chatId, '⚠️ Не знайшов жодної позиції з кількістю у повідомленні. Спробуйте, наприклад: "Круасан 8 шт".');
+    return;
+  }
+
+  const ingredients = await posterCall('menu.getIngredients');
+  const normalizedNames = ingredients.map(i => normalize(i.ingredient_name));
+  const fuse = new Fuse(normalizedNames, { includeScore: true, threshold: 0.35 });
+
+  const matched = [];
+  const unmatched = [];
+  for (const item of parsed.items) {
+    const key = normalize(item.name);
+    let idx = normalizedNames.indexOf(key);
+    if (idx === -1) {
+      const results = fuse.search(key);
+      if (results.length && results[0].score < 0.4) idx = results[0].refIndex;
+    }
+    if (idx === -1) { unmatched.push(item); continue; }
+    const ing = ingredients[idx];
+    matched.push({ ingredientId: ing.ingredient_id, name: ing.ingredient_name, unit: ing.ingredient_unit, qty: item.qty, rawName: item.name });
+  }
+
+  if (!matched.length) {
+    await reply(chatId,
+      `⚠️ Жодну позицію не впізнав у довіднику Poster: ${parsed.items.map(i => i.name).join(', ')}. Перевірте назви вручну на сайті.`);
+    return;
+  }
+
+  const productSuppliers = await readJSON('productSuppliers.json', {});
+  const suppliers = await readJSON('suppliers.json', []);
+
+  const groups = new Map(); // posterSupplierId -> { supplierName, items: [] }
+  for (const item of matched) {
+    const assignment = productSuppliers[item.ingredientId];
+    const supplierIds = (assignment && assignment.supplierIds) || [];
+    const supplierRecord = supplierIds.length === 1 ? suppliers.find(s => s.id === supplierIds[0]) : null;
+    const posterSupplierId = (supplierRecord && supplierRecord.posterSupplierId) || FALLBACK_SUPPLIER_ID;
+    if (!groups.has(posterSupplierId)) groups.set(posterSupplierId, { supplierName: supplierRecord ? supplierRecord.name : null, items: [] });
+    groups.get(posterSupplierId).items.push(item);
+  }
+
+  const date = posterDateTimeStr();
+  const createdGroups = [];
+  const failedGroups = [];
+  for (const [posterSupplierId, group] of groups) {
+    try {
+      const supplyId = await createPosterSupply({
+        date, supplierId: posterSupplierId,
+        items: group.items.map(i => ({ ingredientId: i.ingredientId, qty: i.qty, sum: 0 }))
+      });
+      createdGroups.push({ posterSupplierId, supplyId, ...group });
+    } catch (e) {
+      console.error('createPosterSupply failed:', e);
+      failedGroups.push({ posterSupplierId, ...group });
+    }
+  }
+
+  const log = await readJSON('textSupplies.json', []);
+  const entry = {
+    id: nextId(log),
+    date: localDateStr(),
+    timestamp: new Date().toISOString(),
+    submittedBy: submittedByLabel,
+    rawText: text,
+    matched: matched.map(i => ({ name: i.name, rawName: i.rawName, qty: i.qty, unit: i.unit })),
+    unmatched,
+    failed: failedGroups.length > 0
+  };
+  log.push(entry);
+  await writeJSON('textSupplies.json', log);
+
+  const lines = ['✅ Прихід записано:'];
+  for (const g of createdGroups) {
+    for (const i of g.items) {
+      lines.push(`• ${i.name}: ${i.qty} ${i.unit}${g.supplierName ? '' : ' (постачальник не визначений — перевірте "Постачальники товарів")'}`);
+    }
+  }
+  for (const g of failedGroups) {
+    for (const i of g.items) lines.push(`⚠️ ${i.name}: ${i.qty} ${i.unit} — НЕ вдалось записати в Poster`);
+  }
+  if (unmatched.length) {
+    lines.push('', '❓ Не впізнав:');
+    unmatched.forEach(i => lines.push(`• ${i.name} ${i.qty} ${i.unit}`));
+  }
+  await reply(chatId, lines.join('\n'));
+
+  const toNotify = recipients.filter(r => ['admin', 'accountant'].includes(r.role) && String(r.chatId) !== chatId);
+  for (const r of toNotify) {
+    await reply(r.chatId,
+      `📦 Прихід текстом від ${submittedByLabel}:\n${matched.map(i => `${i.name}: ${i.qty} ${i.unit}`).join('\n')}`);
+  }
+}
+
 router.post('/telegram/webhook', async (req, res) => {
   const secret = req.headers['x-telegram-bot-api-secret-token'];
   if (process.env.TELEGRAM_WEBHOOK_SECRET && secret !== process.env.TELEGRAM_WEBHOOK_SECRET) {
@@ -256,9 +372,13 @@ router.post('/telegram/webhook', async (req, res) => {
     const submittedByLabel = tgHandle ? `${sender.name} (${tgHandle})` : sender.name;
 
     if (!message.photo || !message.photo.length) {
+      if (sender.role === 'waiter' && message.text && message.text.trim() && !message.text.startsWith('/')) {
+        await handleStockText(chatId, message.text.trim(), submittedByLabel, recipients);
+        return res.sendStatus(200);
+      }
       await reply(chatId, sender.role === 'accountant'
         ? 'Надішліть фото чека про оплату — я знайду відповідну накладну за сумою боргу.'
-        : 'Надішліть фото накладної — я розпізнаю і додам її на перевірку.');
+        : 'Надішліть фото накладної — я розпізнаю і додам її на перевірку, або просто напишіть текстом, що привезли (наприклад: "Круасан 8 шт").');
       return res.sendStatus(200);
     }
 

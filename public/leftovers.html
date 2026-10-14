@@ -35,6 +35,17 @@
     </div>
     <div class="table-wrap" id="consumptionWrap"></div>
   </div>
+
+  <!-- TEXT SUPPLIES -->
+  <div style="margin-top:36px">
+    <div class="results-header">
+      <div>
+        <div class="results-title">Останні приходи текстом (Telegram)</div>
+        <div class="results-meta">Офіціанти пишуть боту прихід текстом замість фото накладної — тут видно, що розпізнано й записано в Poster</div>
+      </div>
+    </div>
+    <div class="table-wrap" id="textSuppliesWrap"></div>
+  </div>
 </main>
 
 <div class="toast" id="toast"></div>
@@ -113,6 +124,38 @@ async function loadConsumption() {
 }
 
 document.getElementById('consumptionBtn').addEventListener('click', loadConsumption);
+
+async function loadTextSupplies() {
+  const wrap = document.getElementById('textSuppliesWrap');
+  wrap.innerHTML = `<div class="empty"><div class="spinner" style="margin:0 auto"></div></div>`;
+  try {
+    const res = await authFetch('/api/text-supplies');
+    const list = await res.json();
+
+    if (!list.length) {
+      wrap.innerHTML = `<div class="empty"><div class="empty-icon">💬</div><div class="empty-title">Ще немає приходів текстом</div></div>`;
+      return;
+    }
+
+    wrap.innerHTML = `<table>
+      <thead><tr><th>Дата</th><th>Хто</th><th>Розпізнано</th><th>Не впізнано</th><th>Повідомлення</th></tr></thead>
+      <tbody>
+        ${list.map(e => `
+          <tr>
+            <td>${e.date}</td>
+            <td>${escHtml(e.submittedBy || '')}</td>
+            <td>${(e.matched || []).map(i => `${escHtml(i.name)}: ${i.qty} ${escHtml(i.unit)}`).join('<br>') || '—'}</td>
+            <td>${(e.unmatched || []).length ? `<span class="status-badge unpaid">${(e.unmatched).map(i => escHtml(i.name)).join(', ')}</span>` : '—'}</td>
+            <td style="color:var(--text3);font-size:11px">${escHtml(e.rawText || '')}</td>
+          </tr>`).join('')}
+      </tbody>
+    </table>`;
+  } catch {
+    wrap.innerHTML = `<div class="empty"><div class="empty-title">Помилка завантаження</div></div>`;
+  }
+}
+
+loadTextSupplies();
 
 function escHtml(s) {
   return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');

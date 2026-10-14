@@ -238,6 +238,47 @@ async function recognizeInvoiceImage(imageBase64, mimeType) {
   return { items: mapped, count: mapped.length, supplier, date: aiDate, warning };
 }
 
+// Free-text stock receipt report ("Круасан 8 шт, Булочки 50шт") — a waiter typing what just got
+// delivered, with no fixed format. Extracts {name, qty, unit} triples; name stays whatever the
+// waiter typed (singular/plural, abbreviated) — matching it against the real Poster ingredient
+// catalog is the caller's job (routes/telegram.js), since this function has no catalog to match
+// against and shouldn't guess at ingredient_ids.
+async function recognizeStockText(text) {
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o",
+    max_tokens: 500,
+    messages: [{
+      role: "user",
+      content: `A waiter at a bar is reporting goods just received, in free-form Ukrainian text, no
+fixed format. Extract every (item name, quantity, unit) triple you can find.
+Examples of input: "Круасан 8 шт, Булочки 50шт" / "Привезли 2 ящики пива і 10кг картоплі" / "булка бріош 50".
+Unit defaults to "шт" (pieces) if not stated. Keep the item name as close to the original Ukrainian wording as
+possible (don't translate or heavily normalize it) — just strip obvious filler words.
+Return ONLY a valid JSON object, no markdown, no explanation.
+Format: { "items": [ { "name": string, "qty": number, "unit": string } ] }
+Message: """${text}"""`
+    }]
+  });
+
+  const rawText = response.choices?.[0]?.message?.content || '';
+  const cleaned = rawText.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+
+  let parsed;
+  try { parsed = JSON.parse(cleaned); }
+  catch (e) {
+    const err = new Error('AI returned invalid JSON');
+    err.raw = rawText;
+    throw err;
+  }
+
+  const items = Array.isArray(parsed.items) ? parsed.items : [];
+  return {
+    items: items
+      .map(i => ({ name: (i.name || '').trim(), qty: Number(i.qty) || 0, unit: (i.unit || 'шт').trim() }))
+      .filter(i => i.name && i.qty > 0)
+  };
+}
+
 // Payment receipt (чек/квитанція про оплату) — a completely different document shape from an
 // invoice: just an amount, a date, and who it was paid to. Used by the Telegram bot's
 // бухгалтер-role flow to match a receipt against outstanding invoice debt.
@@ -387,3 +428,4 @@ router.post('/export', async (req, res) => {
 module.exports = router;
 module.exports.recognizeInvoiceImage = recognizeInvoiceImage;
 module.exports.recognizeReceiptImage = recognizeReceiptImage;
+module.exports.recognizeStockText = recognizeStockText;

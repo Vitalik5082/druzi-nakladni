@@ -323,6 +323,13 @@ router.get('/poster/leftovers', async (req, res) => {
   }
 });
 
+// Free-text stock receipts reported by waiters via Telegram (routes/telegram.js) — written there,
+// read-only here for the "Залишки" page's recent-receipts list.
+router.get('/text-supplies', async (req, res) => {
+  const log = await readJSON('textSupplies.json', []);
+  res.json(log.slice(-20).reverse());
+});
+
 // ── FINANCE (ЗП та інші категорії, якщо колись з'являться) ────────
 const FINANCE_CATEGORY_LABELS = {
   1: 'Переказ/інкасація', 2: 'Закриття касової зміни', 3: 'Постачання',
