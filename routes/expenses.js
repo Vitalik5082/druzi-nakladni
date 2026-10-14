@@ -1,8 +1,52 @@
 const express = require('express');
 const { readJSON, writeJSON, nextId } = require('../lib/store');
+const { createPosterExpenseTransaction } = require('../lib/poster');
 
 const router = express.Router();
 const FILE = 'expenses.json';
+
+// Keep in sync with the <option> list on public/expenses.html. Every expense category maps to a
+// real Poster finance category_id so "Інші витрати" always matches between our DB and Poster —
+// Податки/Інтернет/Підписки/Хімія/Пакування/Ремонт didn't exist in Poster and were created via
+// finance.createCategory specifically for this. "Інше" falls back to Poster's generic household
+// expenses bucket, since there's no sensible dedicated category for a catch-all.
+const CATEGORY_TO_POSTER = {
+  'Оренда': 8, 'Комуналка': 9, 'Інтернет': 16, 'Податки': 15, 'Сміття': 12,
+  'Підписки': 17, 'Хімія': 18, 'Пакування': 19, 'Маркетинг': 7, 'Ремонт': 20, 'Інше': 13
+};
+
+// Shared by the website's POST /expenses, the recurring-expenses "apply" endpoint, and the
+// Telegram bot's бухгалтер flow — one place that both writes expenses.json AND pushes the same
+// amount to Poster, so the two never drift apart. A Poster failure never blocks recording the
+// expense locally (that's the source of truth for our own dashboard) — it's just flagged on the
+// record so a failed sync can be found and retried/entered manually later.
+async function createExpenseRecord(expenses, { date, category, description, amount }) {
+  const expense = {
+    id: nextId(expenses),
+    date,
+    category,
+    description: description || '',
+    amount: Number(amount),
+    postedToPoster: false
+  };
+
+  const categoryId = CATEGORY_TO_POSTER[category];
+  if (categoryId) {
+    try {
+      const transactionId = await createPosterExpenseTransaction({
+        categoryId, amount: expense.amount, date: `${date} 12:00:00`,
+        comment: description || category
+      });
+      expense.postedToPoster = true;
+      expense.posterTransactionId = transactionId;
+    } catch (err) {
+      console.error('Poster finance sync failed for expense:', err.message);
+    }
+  }
+
+  expenses.push(expense);
+  return expense;
+}
 
 router.get('/expenses', async (req, res) => {
   const { category, from, to } = req.query;
@@ -21,14 +65,7 @@ router.post('/expenses', async (req, res) => {
   if (amount === undefined || isNaN(Number(amount))) return res.status(400).json({ error: 'Amount required' });
 
   const expenses = await readJSON(FILE, []);
-  const expense = {
-    id: nextId(expenses),
-    date,
-    category,
-    description: description || '',
-    amount: Number(amount)
-  };
-  expenses.push(expense);
+  const expense = await createExpenseRecord(expenses, { date, category, description, amount });
   await writeJSON(FILE, expenses);
   res.json(expense);
 });
@@ -106,14 +143,10 @@ router.post('/recurring-expenses/apply', async (req, res) => {
       e.date.slice(0, 7) === month && e.category === template.category && e.description === template.name);
     if (alreadyApplied) { skipped.push(template.name); continue; }
 
-    const expense = {
-      id: nextId(expenses),
-      date,
-      category: template.category,
-      description: template.name,
+    const expense = await createExpenseRecord(expenses, {
+      date, category: template.category, description: template.name,
       amount: Number(item.amount) || template.amount
-    };
-    expenses.push(expense);
+    });
     created.push(expense);
   }
 
@@ -122,3 +155,4 @@ router.post('/recurring-expenses/apply', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.createExpenseRecord = createExpenseRecord;

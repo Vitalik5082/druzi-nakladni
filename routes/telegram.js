@@ -10,6 +10,7 @@ const { normalize } = require('../lib/convert');
 const { localDateStr, posterCall, createPosterSupply, posterDateTimeStr } = require('../lib/poster');
 const { recognizeInvoiceImage, recognizeReceiptImage, recognizeStockText, recognizeExpenseText } = require('./recognition');
 const { createInvoice, updateInvoice } = require('./invoices');
+const { createExpenseRecord } = require('./expenses');
 
 const router = express.Router();
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -357,20 +358,16 @@ async function handleAccountantExpenseText(chatId, text, month) {
   const expenses = await readJSON('expenses.json', []);
   const created = [];
   for (const item of parsed.items) {
-    const expense = {
-      id: nextId(expenses),
-      date,
-      category: item.category,
-      description: `Звіт бухгалтера за ${month} (через бот)`,
-      amount: item.amount
-    };
-    expenses.push(expense);
+    const expense = await createExpenseRecord(expenses, {
+      date, category: item.category, description: `Звіт бухгалтера за ${month} (через бот)`, amount: item.amount
+    });
     created.push(expense);
   }
   await writeJSON('expenses.json', expenses);
 
   await reply(chatId,
-    `✅ Записано за ${month}:\n${created.map(e => `${e.category}: ${e.amount.toFixed(2)} ₴`).join('\n')}`);
+    `✅ Записано за ${month}:\n${created.map(e =>
+      `${e.category}: ${e.amount.toFixed(2)} ₴${e.postedToPoster ? '' : ' (⚠️ не вдалось синхронізувати з Poster)'}`).join('\n')}`);
 
   const recipients = await readJSON('telegramRecipients.json', []);
   const toNotify = recipients.filter(r => r.role === 'admin' && String(r.chatId) !== chatId);
