@@ -18,6 +18,9 @@ app.use(express.static(path.join(__dirname, 'public')));
 // the auth gate below, or every webhook delivery 401s.
 app.use(require('./routes/telegram'));
 
+// GitHub Actions pings this with its own CRON_SECRET header, not a Supabase Bearer — same reason.
+app.use(require('./routes/cron'));
+
 async function verifySupabaseToken(token) {
   try {
     const res = await fetch(`${process.env.SUPABASE_URL}/auth/v1/user`, {

@@ -4,7 +4,7 @@ require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') }
 
 const path = require('path');
 const { posterCall, ymd, localDateStr, sleep, normalizeModName } = require('../lib/poster');
-const { readJSON, writeJSON } = require('../lib/store');
+const { readJSON, writeJSON, nextId } = require('../lib/store');
 
 async function sendTelegram(chatId, text) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -19,8 +19,8 @@ async function sendTelegram(chatId, text) {
   if (!data.ok) throw new Error('Telegram: ' + JSON.stringify(data));
 }
 
-function getRecipients(role) {
-  const all = readJSON('telegramRecipients.json', []);
+async function getRecipients(role) {
+  const all = await readJSON('telegramRecipients.json', []);
   return role ? all.filter(r => r.role === role) : all;
 }
 
@@ -40,11 +40,27 @@ async function getYesterdayRevenue(date) {
   }));
 
   // cache it too, same as the server's sync-sales, so the website stays in sync
-  const sales = readJSON('posterSales.json', {});
+  const sales = await readJSON('posterSales.json', {});
   sales[date] = items;
-  writeJSON('posterSales.json', sales);
+  await writeJSON('posterSales.json', sales);
 
-  return items.reduce((s, i) => s + i.grossSum, 0);
+  const revenue = Number(items.reduce((s, i) => s + i.grossSum, 0).toFixed(2));
+
+  // "Каса" (cashdays.json) used to need a SEPARATE manual sync (the "Каса" page's own button) —
+  // if nobody ever clicked it, the dashboard just silently had no revenue for that day forever.
+  // Push it here too, same upsert rule as routes/poster.js's /poster/sync-cash: never touch a day
+  // someone manually edited (edited: true).
+  const cashDays = await readJSON('cashdays.json', []);
+  let day = cashDays.find(d => d.date === date);
+  if (day && !day.edited) {
+    day.revenue = revenue;
+    day.source = 'poster';
+  } else if (!day) {
+    cashDays.push({ id: nextId(cashDays), date, revenue, note: '', source: 'poster', edited: false });
+  }
+  await writeJSON('cashdays.json', cashDays);
+
+  return revenue;
 }
 
 async function getYesterdayPayroll(date) {
@@ -54,16 +70,20 @@ async function getYesterdayPayroll(date) {
     .reduce((s, t) => s + Math.abs(Number(t.amount)) / 100, 0);
 }
 
-function getSupplierDebt() {
-  const invoices = readJSON('invoices.json', []);
-  return invoices.reduce((s, inv) => s + Math.max(0, (inv.total || 0) - (inv.paidAmount || 0)), 0);
+// Real debt is the GROSS (з ПДВ) balance — paidAmount is recorded in з ПДВ terms (what actually
+// gets paid to a supplier), so comparing it against the net total would understate debt by 20%.
+function grossOf(inv) { return inv.total_with_vat || (inv.total || 0) * 1.2; }
+
+async function getSupplierDebt() {
+  const invoices = await readJSON('invoices.json', []);
+  return invoices.reduce((s, inv) => s + Math.max(0, grossOf(inv) - (inv.paidAmount || 0)), 0);
 }
 
-function computeOrderRecommendations() {
-  const ingredientsRef = readJSON('posterIngredients.json', {});
-  const productSuppliers = readJSON('productSuppliers.json', {});
-  const sales = readJSON('posterSales.json', {});
-  const techcards = readJSON('techcards.json', {});
+async function computeOrderRecommendations() {
+  const ingredientsRef = await readJSON('posterIngredients.json', {});
+  const productSuppliers = await readJSON('productSuppliers.json', {});
+  const sales = await readJSON('posterSales.json', {});
+  const techcards = await readJSON('techcards.json', {});
 
   const dates = [];
   const today = new Date();
@@ -106,20 +126,27 @@ function computeOrderRecommendations() {
     const recommendedQty = reliable ? Math.max(0, avgWeekly * 1.1 - leftover) : avgWeekly * 1.1;
     if (recommendedQty < 0.01) continue;
     const assignment = productSuppliers[ing.ingredient_id];
-    items.push({ name: ing.name, unit: ing.unit, recommendedQty, supplierIds: (assignment && assignment.supplierIds) || [] });
+    const packSize = assignment && assignment.packSize;
+    const packUnit = assignment && assignment.packUnit;
+    items.push({
+      name: ing.name, unit: ing.unit, recommendedQty,
+      packSize: packSize || null, packUnit: packUnit || null,
+      packsNeeded: packSize ? Math.ceil(recommendedQty / packSize) : null,
+      supplierIds: (assignment && assignment.supplierIds) || []
+    });
   }
   items.sort((a, b) => b.recommendedQty - a.recommendedQty);
   return items;
 }
 
-function getTopOrderRecommendations(limit) {
-  return computeOrderRecommendations().slice(0, limit);
+async function getTopOrderRecommendations(limit) {
+  return (await computeOrderRecommendations()).slice(0, limit);
 }
 
-function getSuppliersOrderingToday() {
-  const suppliers = readJSON('suppliers.json', []);
-  const invoices = readJSON('invoices.json', []);
-  const allRecs = computeOrderRecommendations();
+async function getSuppliersOrderingToday() {
+  const suppliers = await readJSON('suppliers.json', []);
+  const invoices = await readJSON('invoices.json', []);
+  const allRecs = await computeOrderRecommendations();
   const todayWeekday = new Date().getDay(); // 0=Sun..6=Sat, matches orderDays convention
 
   return suppliers
@@ -128,7 +155,7 @@ function getSuppliersOrderingToday() {
       const items = allRecs.filter(i => i.supplierIds.includes(s.id));
       const debt = invoices
         .filter(inv => (inv.supplier || '').toLowerCase() === s.name.toLowerCase())
-        .reduce((sum, inv) => sum + Math.max(0, (inv.total || 0) - (inv.paidAmount || 0)), 0);
+        .reduce((sum, inv) => sum + Math.max(0, grossOf(inv) - (inv.paidAmount || 0)), 0);
       return { name: s.name, contact: s.contact || '', items, debt };
     })
     .filter(s => s.items.length || s.debt > 0);
@@ -141,7 +168,7 @@ async function main() {
   const orderLines = [];
   let todaySuppliers = [];
   try {
-    todaySuppliers = getSuppliersOrderingToday();
+    todaySuppliers = await getSuppliersOrderingToday();
     if (todaySuppliers.length) {
       orderLines.push('📦 <b>Сьогодні день замовлення:</b>');
       todaySuppliers.forEach(s => {
@@ -156,7 +183,7 @@ async function main() {
   }
 
   try {
-    const top = getTopOrderRecommendations(5);
+    const top = await getTopOrderRecommendations(5);
     if (top.length) {
       orderLines.push('', '🛒 <b>Загальний топ-5 на замовлення:</b>');
       top.forEach(i => orderLines.push(`• ${i.name}: ${i.recommendedQty.toFixed(1)} ${i.unit}`));
@@ -183,7 +210,7 @@ async function main() {
   }
 
   try {
-    const debt = getSupplierDebt();
+    const debt = await getSupplierDebt();
     fullLines.push(`📄 Борг постачальникам: <b>${debt.toFixed(2)} ₴</b>`);
   } catch (err) {
     fullLines.push(`📄 Борг: помилка (${err.message})`);
@@ -191,8 +218,8 @@ async function main() {
 
   fullLines.push('', ...orderLines);
 
-  const admins = getRecipients('admin');
-  const others = getRecipients().filter(r => r.role !== 'admin');
+  const admins = await getRecipients('admin');
+  const others = (await getRecipients()).filter(r => r.role !== 'admin');
 
   for (const r of admins) {
     await sendTelegram(r.chatId, fullLines.join('\n'));
@@ -205,7 +232,11 @@ async function main() {
   }
 }
 
-main().catch(err => {
-  console.error('Daily report failed:', err);
-  process.exit(1);
-});
+module.exports = { main };
+
+if (require.main === module) {
+  main().catch(err => {
+    console.error('Daily report failed:', err);
+    process.exit(1);
+  });
+}

@@ -1,0 +1,21 @@
+name: Cron tick
+
+# Pings the накладна app's /cron/tick endpoint every 15 minutes, 24/7 — fully independent of any
+# local machine and of Vercel's own Cron Jobs (Hobby plan caps those at 2 jobs/once-per-day, nowhere
+# near enough for this app's 5 differently-timed jobs). The endpoint itself decides, by real Kyiv
+# wall-clock time, which job(s) are actually due; this workflow's only responsibility is "call it
+# often enough that nothing gets missed", so DST and daylight-saving transitions need no changes
+# here — see routes/cron.js in the main repo for the scheduling logic.
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping cron/tick
+        run: |
+          curl -sf -X POST "https://druzi-nakladni.vercel.app/cron/tick" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"

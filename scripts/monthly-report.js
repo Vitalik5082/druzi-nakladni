@@ -28,13 +28,13 @@ function previousMonthRange() {
   return { from: fmt(firstOfPrevMonth), to: fmt(lastOfPrevMonth) };
 }
 
-function computeDashboard(from, to) {
-  const cashDays = readJSON('cashdays.json', []).filter(d => d.date >= from && d.date <= to);
-  const invoices = readJSON('invoices.json', []).filter(i => i.date >= from && i.date <= to);
-  const expenses = readJSON('expenses.json', []).filter(e => e.date >= from && e.date <= to);
-  const payroll = readJSON('payroll.json', []).filter(p => p.date >= from && p.date <= to);
+async function computeDashboard(from, to) {
+  const cashDays = (await readJSON('cashdays.json', [])).filter(d => d.date >= from && d.date <= to);
+  const invoices = (await readJSON('invoices.json', [])).filter(i => i.date >= from && i.date <= to);
+  const expenses = (await readJSON('expenses.json', [])).filter(e => e.date >= from && e.date <= to);
+  const payroll = (await readJSON('payroll.json', [])).filter(p => p.date >= from && p.date <= to);
 
-  const posterFinance = readJSON('posterFinance.json', {});
+  const posterFinance = await readJSON('posterFinance.json', {});
   const financeDates = Object.keys(posterFinance).filter(d => d >= from && d <= to);
   let payrollFromPoster = 0, otherExpensesFromPoster = 0;
   for (const date of financeDates) {
@@ -56,7 +56,7 @@ function computeDashboard(from, to) {
 
 async function main() {
   const { from, to } = previousMonthRange();
-  const d = computeDashboard(from, to);
+  const d = await computeDashboard(from, to);
 
   const lines = [
     `📅 <b>Місячний звіт: ${from} — ${to}</b>`, '',
@@ -69,14 +69,20 @@ async function main() {
     `${d.profit >= 0 ? '✅' : '⚠️'} <b>Чистий прибуток: ${d.profit.toFixed(2)} ₴</b>`
   ];
 
-  const recipients = readJSON('telegramRecipients.json', []).filter(r => r.role === 'admin');
+  const recipients = (await readJSON('telegramRecipients.json', [])).filter(r => r.role === 'admin');
   for (const r of recipients) {
     await sendTelegram(r.chatId, lines.join('\n'));
     console.log('Monthly report sent to', r.name);
   }
 }
 
-main().catch(err => {
-  console.error('Monthly report failed:', err);
-  process.exit(1);
-});
+module.exports = { main };
+
+// Runs standalone (Windows Task Scheduler) only when executed directly — when required as a
+// module (routes/cron.js, for the GitHub Actions-driven Vercel cron tick) it just exports main().
+if (require.main === module) {
+  main().catch(err => {
+    console.error('Monthly report failed:', err);
+    process.exit(1);
+  });
+}
