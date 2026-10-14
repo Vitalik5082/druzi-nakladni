@@ -61,8 +61,14 @@ function findSupplier(suppliers, guessName) {
   return match || null;
 }
 
+// paidAmount tracks real cash handed to the supplier, which is always the GROSS (з ПДВ) figure —
+// a платіжна інструкція/receipt shows that amount, never the net accounting baseline.
+function grossTotalOf(invoice) {
+  return invoice.total_with_vat || (invoice.total || 0) * 1.2;
+}
+
 async function markInvoicePaid(invoice, paidDate) {
-  await updateInvoice(invoice.id, { paidAmount: invoice.total, paidDate: paidDate || localDateStr() });
+  await updateInvoice(invoice.id, { paidAmount: grossTotalOf(invoice), paidDate: paidDate || localDateStr() });
 }
 
 // Broadcasts a payment-status change to admin+бухгалтер so they see it without checking the site —
@@ -73,7 +79,7 @@ async function notifyStatusChange(invoice, statusText, excludeChatId) {
     ['admin', 'accountant'].includes(r.role) && String(r.chatId) !== String(excludeChatId));
   for (const r of toNotify) {
     await reply(r.chatId,
-      `🔄 Статус накладної змінено (${invoice.supplier}, ${invoice.date}, ${invoice.total.toFixed(2)} ₴):\n${statusText}`);
+      `🔄 Статус накладної змінено (${invoice.supplier}, ${invoice.date}, ${grossTotalOf(invoice).toFixed(2)} ₴):\n${statusText}`);
   }
 }
 
@@ -102,9 +108,9 @@ async function handleCallback(callbackQuery) {
     await tg('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Оплату прив\'язано' });
     await tg('editMessageText', {
       chat_id: chatId, message_id: messageId,
-      text: `✅ Чек прив'язано до: ${invoice.supplier}, ${invoice.date}, ${invoice.total.toFixed(2)} ₴`
+      text: `✅ Чек прив'язано до: ${invoice.supplier}, ${invoice.date}, ${grossTotalOf(invoice).toFixed(2)} ₴`
     });
-    await notifyStatusChange(invoice, `✅ Оплачено (чек від бухгалтера, ${invoice.total.toFixed(2)} ₴)`, chatId);
+    await notifyStatusChange(invoice, `✅ Оплачено (чек від бухгалтера, ${grossTotalOf(invoice).toFixed(2)} ₴)`, chatId);
     return;
   }
 
@@ -114,16 +120,16 @@ async function handleCallback(callbackQuery) {
     await tg('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Позначено як оплачено' });
     await tg('editMessageText', {
       chat_id: chatId, message_id: messageId,
-      text: `✅ Оплачено (${invoice.total.toFixed(2)} ₴, ${localDateStr()})`
+      text: `✅ Оплачено (${grossTotalOf(invoice).toFixed(2)} ₴, ${localDateStr()})`
     });
-    await notifyStatusChange(invoice, `✅ Оплачено (${invoice.total.toFixed(2)} ₴)`, chatId);
+    await notifyStatusChange(invoice, `✅ Оплачено (${grossTotalOf(invoice).toFixed(2)} ₴)`, chatId);
   } else {
     await tg('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Записано як борг' });
     await tg('editMessageText', {
       chat_id: chatId, message_id: messageId,
-      text: `📝 Записано як борг (${invoice.total.toFixed(2)} ₴)`
+      text: `📝 Записано як борг (${grossTotalOf(invoice).toFixed(2)} ₴)`
     });
-    await notifyStatusChange(invoice, `📝 В борг (${invoice.total.toFixed(2)} ₴)`, chatId);
+    await notifyStatusChange(invoice, `📝 В борг (${grossTotalOf(invoice).toFixed(2)} ₴)`, chatId);
   }
 }
 
@@ -142,7 +148,7 @@ async function handleReceiptPhoto(chatId, base64) {
   const suppliers = await readJSON('suppliers.json', []);
 
   const outstanding = invoices
-    .map(inv => ({ inv, balance: Number(((inv.total || 0) - (inv.paidAmount || 0)).toFixed(2)) }))
+    .map(inv => ({ inv, balance: Number((grossTotalOf(inv) - (inv.paidAmount || 0)).toFixed(2)) }))
     .filter(x => x.balance > 0.01);
 
   let candidates = outstanding.filter(x => Math.abs(x.balance - result.amount) < 1);
@@ -168,7 +174,7 @@ async function handleReceiptPhoto(chatId, base64) {
     await markInvoicePaid(inv, result.date || undefined);
     await reply(chatId,
       `✅ Чек на ${result.amount.toFixed(2)} ₴ прив'язано до накладної:\n` +
-      `Постачальник: ${inv.supplier}\nДата: ${inv.date}\nСума: ${inv.total.toFixed(2)} ₴`);
+      `Постачальник: ${inv.supplier}\nДата: ${inv.date}\nСума: ${grossTotalOf(inv).toFixed(2)} ₴`);
     await notifyStatusChange(inv, `✅ Оплачено (чек від бухгалтера, ${result.amount.toFixed(2)} ₴)`, chatId);
     return;
   }
@@ -178,7 +184,7 @@ async function handleReceiptPhoto(chatId, base64) {
     text: `💳 Чек на ${result.amount.toFixed(2)} ₴ підходить до кількох накладних — оберіть потрібну:`,
     reply_markup: {
       inline_keyboard: candidates.slice(0, 8).map(({ inv }) => ([{
-        text: `${inv.supplier} — ${inv.date} — ${inv.total.toFixed(2)} ₴`,
+        text: `${inv.supplier} — ${inv.date} — ${grossTotalOf(inv).toFixed(2)} ₴`,
         callback_data: `recv:${inv.id}`
       }]))
     }
@@ -295,27 +301,35 @@ router.post('/telegram/webhook', async (req, res) => {
     if (created.duplicate) {
       await reply(chatId,
         `⚠️ Схожа накладна вже є в системі (${created.existing.supplier}, ${created.existing.date}, ` +
-        `${created.existing.total.toFixed(2)} ₴). Не додав повторно.`);
+        `${(created.existing.total_with_vat || created.existing.total * 1.2).toFixed(2)} ₴). Не додав повторно.`);
       return res.sendStatus(200);
     }
 
     const inv = created.invoice;
+    const grossTotal = inv.total_with_vat || inv.total * 1.2;
     await reply(chatId,
       `✅ Накладну додано на перевірку!\nПостачальник: ${inv.supplier}\nДата: ${inv.date}\n` +
-      `Сума: ${inv.total.toFixed(2)} ₴${result.warning ? '\n\n⚠️ ' + result.warning : ''}`);
+      `Сума до сплати (з ПДВ): ${grossTotal.toFixed(2)} ₴${result.warning ? '\n\n⚠️ ' + result.warning : ''}`);
 
     await askPaymentStatus(chatId, inv.id);
 
     // Every накладна goes to admin AND бухгалтер, always — visible sender + status, regardless of
     // supplier config (previously gated by telegramInvoicesAllowed, which caused silent misses).
+    // Forward the actual photo (by file_id, no re-download), not just the AI-extracted text — the
+    // бухгалтер needs to see the real document, not a summary, especially to double-check the AI.
     const toNotify = recipients.filter(r =>
       String(r.chatId) !== chatId && ['admin', 'accountant'].includes(r.role));
 
     for (const r of toNotify) {
-      await reply(r.chatId,
-        `🧾 Нова накладна від ${submittedByLabel} (через бот):\n` +
-        `Постачальник: ${inv.supplier}\nДата: ${inv.date}\nСума: ${inv.total.toFixed(2)} ₴\n` +
-        `Статус: на перевірці.\nПеревірте на сайті в розділі "Накладні".`);
+      try {
+        await tg('sendPhoto', {
+          chat_id: r.chatId,
+          photo: largest.file_id,
+          caption: `🧾 Нова накладна від ${submittedByLabel} (через бот):\n` +
+            `Постачальник: ${inv.supplier}\nДата: ${inv.date}\nСума до сплати (з ПДВ): ${grossTotal.toFixed(2)} ₴\n` +
+            `Статус: на перевірці.\nПеревірте на сайті в розділі "Накладні".`
+        });
+      } catch (e) { console.error('Invoice photo forward failed:', e); }
     }
 
     res.sendStatus(200);

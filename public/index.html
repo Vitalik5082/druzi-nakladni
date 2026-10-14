@@ -628,8 +628,9 @@ async function saveInvoice(force, skipNewProductCheck) {
     showToast('✓ Накладну збережено в реєстрі', 'success');
     fetchSuppliers();
 
-    if (confirm(`Накладну на ${data.total.toFixed(2)} ₴ збережено. Вона вже оплачена?`)) {
-      const paidAmount = prompt('Яку суму сплачено?', data.total.toFixed(2));
+    const grossTotal = data.total_with_vat || data.total * 1.2;
+    if (confirm(`Накладну на ${grossTotal.toFixed(2)} ₴ (з ПДВ) збережено. Вона вже оплачена?`)) {
+      const paidAmount = prompt('Яку суму сплачено (з ПДВ)?', grossTotal.toFixed(2));
       if (paidAmount !== null) {
         await authFetch(`/api/invoices/${data.id}`, {
           method: 'PATCH',

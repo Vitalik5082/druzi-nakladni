@@ -9,9 +9,14 @@ const SUPPLIERS_FILE = 'suppliers.json';
 const SUPPLIER_LEARN_FILE = 'supplierLearn.json';
 
 function deriveStatus(invoice) {
+  // paidAmount is real cash handed to the supplier — compared against the GROSS (з ПДВ) total,
+  // not the net accounting baseline. A платіжна інструкція/receipt always shows the з ПДВ figure,
+  // so matching against net total here would make every fully-paid invoice look underpaid by the
+  // VAT amount.
   const paid = invoice.paidAmount || 0;
+  const payable = invoice.total_with_vat || invoice.total || 0;
   if (paid <= 0) return 'unpaid';
-  if (paid >= invoice.total) return 'paid';
+  if (paid >= payable - 0.01) return 'paid';
   return 'partial';
 }
 

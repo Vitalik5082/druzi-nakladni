@@ -92,7 +92,7 @@
     <div class="modal-sub" id="payModalSub"></div>
     <div class="form-grid">
       <div class="form-field">
-        <label for="payAmount">Сплачено (₴)</label>
+        <label for="payAmount">Сплачено, з ПДВ (₴)</label>
         <input id="payAmount" type="number" step="any">
       </div>
       <div class="form-field">
@@ -171,6 +171,10 @@
 
 <script>
 let invoices = [];
+// Real cash owed to a supplier is the GROSS (з ПДВ) total, not the net accounting baseline —
+// paidAmount is always recorded in з ПДВ terms (what actually gets paid), so debt must compare
+// against the same basis everywhere, or every fully-paid invoice looks underpaid by the VAT amount.
+function grossOf(i) { return i.total_with_vat || (i.total || 0) * 1.2; }
 let payModalId = null;
 const openFolders = new Set();
 const openInvoices = new Set();
@@ -228,7 +232,7 @@ function statusLabel(s) {
 
 function render() {
   const total = invoices.reduce((s, i) => s + (i.total_with_vat || i.total * 1.2 || 0), 0);
-  const debt = invoices.reduce((s, i) => s + Math.max(0, (i.total || 0) - (i.paidAmount || 0)), 0);
+  const debt = invoices.reduce((s, i) => s + Math.max(0, grossOf(i) - (i.paidAmount || 0)), 0);
 
   document.getElementById('statCount').textContent = invoices.length;
   document.getElementById('statTotal').textContent = total.toFixed(2) + ' ₴';
@@ -251,15 +255,15 @@ function render() {
   }
 
   const suppliers = Object.keys(bySupplier).sort((a, b) => {
-    const debtA = bySupplier[a].reduce((s, i) => s + Math.max(0, (i.total||0)-(i.paidAmount||0)), 0);
-    const debtB = bySupplier[b].reduce((s, i) => s + Math.max(0, (i.total||0)-(i.paidAmount||0)), 0);
+    const debtA = bySupplier[a].reduce((s, i) => s + Math.max(0, grossOf(i)-(i.paidAmount||0)), 0);
+    const debtB = bySupplier[b].reduce((s, i) => s + Math.max(0, grossOf(i)-(i.paidAmount||0)), 0);
     return debtB - debtA;
   });
 
   wrap.innerHTML = suppliers.map(supplier => {
     const list = bySupplier[supplier].sort((a, b) => b.date.localeCompare(a.date));
     const supplierTotal = list.reduce((s, i) => s + (i.total || 0), 0);
-    const supplierDebt = list.reduce((s, i) => s + Math.max(0, (i.total||0)-(i.paidAmount||0)), 0);
+    const supplierDebt = list.reduce((s, i) => s + Math.max(0, grossOf(i)-(i.paidAmount||0)), 0);
     const isOpen = openFolders.has(supplier);
 
     return `
@@ -378,7 +382,7 @@ function openPayModal(id) {
   if (!inv) return;
   payModalId = id;
   document.getElementById('payModalSub').textContent =
-    `${escHtml(inv.supplier || '—')} від ${inv.date} — сума ${inv.total.toFixed(2)} ₴`;
+    `${escHtml(inv.supplier || '—')} від ${inv.date} — сума до сплати (з ПДВ) ${grossOf(inv).toFixed(2)} ₴`;
   document.getElementById('payAmount').value = inv.paidAmount || 0;
   document.getElementById('payDate').value = inv.paidDate || '';
   document.getElementById('payDue').value = inv.dueDate || '';
