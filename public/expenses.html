@@ -213,9 +213,26 @@ function renderRecurring() {
         ${t.note ? `<div style="font-size:10px;color:var(--text3)">${escHtml(t.note)}</div>` : ''}
       </div>
       <input type="number" class="price-input rec-amount" data-id="${t.id}" value="${t.amount}" step="any" style="width:100px">
+      <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text3);white-space:nowrap" title="Застосовувати автоматично щомісяця 15-го числа (без ручного натискання)">
+        <input type="checkbox" class="rec-auto" data-id="${t.id}" ${t.autoApply ? 'checked' : ''}> авто 15-го
+      </label>
       <button class="btn sm danger" onclick="deleteRecurring(${t.id})">✕</button>
     </div>
   `).join('');
+
+  wrap.querySelectorAll('.rec-auto').forEach(cb => cb.addEventListener('change', async e => {
+    const id = e.target.dataset.id;
+    try {
+      await authFetch(`/api/recurring-expenses/${id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ autoApply: e.target.checked })
+      });
+      showToast(e.target.checked ? '✓ Увімкнено автозаповнення' : '✓ Вимкнено автозаповнення', 'success');
+    } catch {
+      showToast('Помилка збереження', 'error');
+      e.target.checked = !e.target.checked;
+    }
+  }));
 }
 
 document.getElementById('addRecurringBtn').addEventListener('click', async () => {

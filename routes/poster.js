@@ -500,6 +500,13 @@ router.get('/poster/order-recommendations', async (req, res) => {
       .map(id => suppliers.find(s => s.id === Number(id)))
       .filter(Boolean);
 
+    // Suppliers sell whole packs (ящик/пачка/відро), not "2.37 kg" — when packSize is configured
+    // (сторінка "Постачальники товарів"), round the raw recommendation UP to whole packs so the
+    // number that reaches a supplier is actually orderable.
+    const packSize = assignment && assignment.packSize;
+    const packUnit = assignment && assignment.packUnit;
+    const packsNeeded = packSize ? Math.ceil(recommendedQty / packSize) : null;
+
     const base = {
       ingredient_id: ing.ingredient_id,
       name: ing.name,
@@ -508,6 +515,9 @@ router.get('/poster/order-recommendations', async (req, res) => {
       reliable,
       avgWeekly: Number(avgWeekly.toFixed(3)),
       recommendedQty: Number(recommendedQty.toFixed(3)),
+      packSize: packSize || null,
+      packUnit: packUnit || null,
+      packsNeeded,
       note: assignment ? assignment.note : ''
     };
 

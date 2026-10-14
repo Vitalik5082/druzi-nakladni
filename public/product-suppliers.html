@@ -51,6 +51,9 @@
           <th>Одиниця</th>
           <th>Постачальники (можна декілька)</th>
           <th>Нотатка</th>
+          <th title="Для щоденного дайджесту постачальнику (scripts/supplier-stock-digest.js) — нижче цього залишку надсилаємо повідомлення">Поріг (мало)</th>
+          <th title="Скільки базових одиниць (кг/л/шт) в одній упаковці — рекомендації замовлення округлюються до цілих упаковок">К-сть в упаковці</th>
+          <th title="Назва упаковки: ящик, пачка, відро, мішок, упаковка...">Назва упаковки</th>
         </tr>
       </thead>
       <tbody id="tableBody"></tbody>
@@ -102,7 +105,7 @@ function render() {
 
   const tbody = document.getElementById('tableBody');
   if (!filtered.length) {
-    tbody.innerHTML = `<tr><td colspan="5"><div class="empty">
+    tbody.innerHTML = `<tr><td colspan="7"><div class="empty">
       <div class="empty-icon">📦</div>
       <div class="empty-title">Немає інгредієнтів</div>
       <div>Синхронізуй їх на сторінці "Залишки" або "Техкарти"</div></div></td></tr>`;
@@ -124,6 +127,9 @@ function render() {
       <td><span class="unit-badge">${escHtml(i.unit)}</span></td>
       <td style="max-width:420px">${checkboxes}</td>
       <td><input class="modal-search note-input" style="margin:0" placeholder="опційно" value="${escHtml(a.note || '')}"></td>
+      <td><input type="number" step="any" class="modal-search threshold-input" style="margin:0;width:70px" placeholder="—" value="${a.lowStockThreshold ?? ''}"></td>
+      <td><input type="number" step="any" class="modal-search packsize-input" style="margin:0;width:70px" placeholder="—" value="${a.packSize ?? ''}"></td>
+      <td><input class="modal-search packunit-input" style="margin:0;width:90px" placeholder="ящик" value="${escHtml(a.packUnit || '')}"></td>
     </tr>`;
   }).join('');
 }
@@ -135,8 +141,9 @@ document.getElementById('tableBody').addEventListener('change', e => {
   if (!tr) return;
   syncRowIntoState(tr);
 });
+const textInputClasses = ['note-input', 'threshold-input', 'packsize-input', 'packunit-input'];
 document.getElementById('tableBody').addEventListener('input', e => {
-  if (!e.target.classList.contains('note-input')) return;
+  if (!textInputClasses.some(c => e.target.classList.contains(c))) return;
   const tr = e.target.closest('tr[data-id]');
   if (!tr) return;
   syncRowIntoState(tr);
@@ -147,10 +154,18 @@ function syncRowIntoState(tr) {
   touchedIds.add(ingredientId);
   const supplierIds = Array.from(tr.querySelectorAll('.supplier-check:checked')).map(c => Number(c.value));
   const note = tr.querySelector('.note-input').value;
-  if (!supplierIds.length && !note.trim()) {
+  const lowStockThreshold = tr.querySelector('.threshold-input').value;
+  const packSize = tr.querySelector('.packsize-input').value;
+  const packUnit = tr.querySelector('.packunit-input').value;
+  if (!supplierIds.length && !note.trim() && !lowStockThreshold && !packSize && !packUnit.trim()) {
     delete assignments[ingredientId];
   } else {
-    assignments[ingredientId] = { supplierIds, note };
+    assignments[ingredientId] = {
+      supplierIds, note,
+      lowStockThreshold: lowStockThreshold === '' ? undefined : Number(lowStockThreshold),
+      packSize: packSize === '' ? undefined : Number(packSize),
+      packUnit: packUnit || undefined
+    };
   }
 }
 
@@ -161,7 +176,10 @@ document.getElementById('saveAllBtn').addEventListener('click', async () => {
   // include every row the user touched this session, even ones now empty (= explicit removal)
   const rows = Array.from(touchedIds).map(ingredientId => {
     const a = assignments[ingredientId] || { supplierIds: [], note: '' };
-    return { ingredientId, supplierIds: a.supplierIds, note: a.note };
+    return {
+      ingredientId, supplierIds: a.supplierIds, note: a.note,
+      lowStockThreshold: a.lowStockThreshold, packSize: a.packSize, packUnit: a.packUnit
+    };
   });
 
   document.getElementById('saveStatus').textContent = 'Збереження...';

@@ -102,11 +102,12 @@ router.patch('/recurring-expenses/:id', async (req, res) => {
   const template = templates.find(t => t.id === Number(req.params.id));
   if (!template) return res.status(404).json({ error: 'Not found' });
 
-  const { name, category, amount, note } = req.body;
+  const { name, category, amount, note, autoApply } = req.body;
   if (name !== undefined) template.name = name;
   if (category !== undefined) template.category = category;
   if (amount !== undefined) template.amount = Number(amount);
   if (note !== undefined) template.note = note;
+  if (autoApply !== undefined) template.autoApply = !!autoApply;
 
   await writeJSON(RECURRING_FILE, templates);
   res.json(template);

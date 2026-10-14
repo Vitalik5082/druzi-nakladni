@@ -89,7 +89,11 @@ function render(items) {
                 ${!i.reliable ? '<span style="color:var(--warn)" title="Залишок у Poster не ведеться коректно — рекомендація рахується з продажів">?</span>' : ''}
               </td>
               <td style="text-align:right">${i.avgWeekly.toFixed(2)}</td>
-              <td style="text-align:right" class="total-cell" style="color:var(--accent)">${i.recommendedQty.toFixed(2)} ${escHtml(i.unit)}</td>
+              <td style="text-align:right" class="total-cell" style="color:var(--accent)">
+                ${i.packsNeeded
+                  ? `${i.packsNeeded} ${escHtml(i.packUnit || 'уп.')} <span style="color:var(--text3);font-weight:400">(≈${i.recommendedQty.toFixed(2)} ${escHtml(i.unit)})</span>`
+                  : `${i.recommendedQty.toFixed(2)} ${escHtml(i.unit)}`}
+              </td>
               <td style="color:var(--text3);font-size:11px">${escHtml(i.note || '')}</td>
             </tr>
           `).join('')}
