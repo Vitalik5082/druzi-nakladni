@@ -247,7 +247,8 @@ async function changeInvoiceSupplier(id, supplier) {
       body: JSON.stringify({ supplier })
     });
     if (!res.ok) throw new Error();
-    showToast('✓ Постачальника змінено', 'success');
+    const data = await res.json();
+    showToast(data.vatWarning ? `⚠️ ${data.vatWarning}` : '✓ Постачальника змінено', data.vatWarning ? '' : 'success', data.vatWarning ? 8000 : 3000);
     loadInvoices();
   } catch {
     showToast('Помилка збереження', 'error');
@@ -953,11 +954,11 @@ function escAttr(s) {
   return escHtml(s).replace(/'/g, '&#39;');
 }
 
-function showToast(msg, type = '') {
+function showToast(msg, type = '', duration = 3000) {
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.className = `toast ${type} show`;
-  setTimeout(() => t.classList.remove('show'), 3000);
+  setTimeout(() => t.classList.remove('show'), duration);
 }
 
 document.getElementById('applyFilterBtn').addEventListener('click', loadInvoices);

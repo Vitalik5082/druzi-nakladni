@@ -170,6 +170,22 @@ async function updateInvoice(id, { paidAmount, paidDate, dueDate, supplier, date
   const invoice = invoices.find(inv => inv.id === Number(id));
   if (!invoice) return null;
 
+  // Changing the supplier on an EXISTING invoice never re-derives the VAT direction — createInvoice()
+  // only applies reverseVatDirection() once, at creation time, based on whichever supplier matched
+  // then. If the invoice was created unmatched (so prices were assumed net) and later reassigned to
+  // a pricesIncludeVat supplier (or the other way), the totals stay silently wrong by ~20% — exactly
+  // the Кока-Кола bug fixed twice by hand this session, just via the rename path instead of OCR.
+  // Auto-recalculating here is unsafe once an item may have already been manually edited (no
+  // reliable "original raw price" to re-derive from) — surface it as a warning instead of guessing.
+  let vatWarning = null;
+  if (supplier !== undefined && supplier !== invoice.supplier) {
+    const suppliers = await readJSON(SUPPLIERS_FILE, []);
+    const newSupplierRecord = suppliers.find(s => s.name === supplier);
+    if (newSupplierRecord && newSupplierRecord.pricesIncludeVat) {
+      vatWarning = `Постачальник "${supplier}" позначений "ціна з ПДВ" — перевірте вручну, чи суми в накладній правильні (можливо, потрібно перерахувати через "Редагувати").`;
+    }
+  }
+
   if (paidAmount !== undefined) invoice.paidAmount = Number(paidAmount) || 0;
   if (paidDate !== undefined) invoice.paidDate = paidDate;
   if (dueDate !== undefined) invoice.dueDate = dueDate;
@@ -199,7 +215,7 @@ async function updateInvoice(id, { paidAmount, paidDate, dueDate, supplier, date
   await writeJSON(FILE, invoices);
   if (supplier) await ensureSupplier(supplier);
 
-  return { ...invoice, status: deriveStatus(invoice) };
+  return { ...invoice, status: deriveStatus(invoice), vatWarning };
 }
 
 router.patch('/invoices/:id', async (req, res) => {

@@ -20,7 +20,10 @@ function buildAssignment({ supplierIds, note, packSize, packUnit, lowStockThresh
   if (lowStockThreshold !== undefined && lowStockThreshold !== null && lowStockThreshold !== '') {
     assignment.lowStockThreshold = Number(lowStockThreshold);
   }
-  const isEmpty = !assignment.supplierIds.length && !assignment.note && !assignment.packSize && assignment.lowStockThreshold === undefined;
+  // Missed packUnit — a request setting ONLY packUnit (no supplierIds/note/packSize/threshold)
+  // still judged "empty" and got silently deleted (delete map[ingredientId]) instead of saved.
+  const isEmpty = !assignment.supplierIds.length && !assignment.note && !assignment.packSize
+    && !assignment.packUnit && assignment.lowStockThreshold === undefined;
   return isEmpty ? null : assignment;
 }
 

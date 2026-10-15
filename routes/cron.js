@@ -71,27 +71,38 @@ router.all('/cron/tick', async (req, res) => {
   }
 
   const now = kyivNow();
-  const lastRun = await readJSON('cronLastRun.json', {});
   const results = [];
 
   for (const job of JOBS) {
     if (job.onlyOnDay && now.day !== job.onlyOnDay) continue;
     if (!withinWindow(now.minutesSinceMidnight, job.targetHM)) continue;
-    if (lastRun[job.key] === now.date) continue; // already ran today
+
+    // Both cron-job.org and GitHub Actions are kept running against this same endpoint (one as a
+    // backup for the other) — two ticks landing close together inside the same 20-min window used
+    // to both read "not run today" before either wrote back, so Oleg/waiters/admin got some
+    // reminders twice. Re-reading fresh and claiming (writing the date) BEFORE running the job,
+    // instead of once at the very end, shrinks that race window from "however long the whole tick
+    // takes" down to just this one read+write — not a true atomic lock (kv_store has none to offer),
+    // but good enough for two schedulers 15 minutes apart.
+    const lastRun = await readJSON('cronLastRun.json', {});
+    if (lastRun[job.key] === now.date) continue; // already claimed/ran today
+    lastRun[job.key] = now.date;
+    await writeJSON('cronLastRun.json', lastRun);
 
     try {
       await jobModules[job.key].main();
-      lastRun[job.key] = now.date;
       results.push({ job: job.key, status: 'ok' });
     } catch (err) {
       console.error(`cron job ${job.key} failed:`, err);
       results.push({ job: job.key, status: 'error', message: err.message });
-      // Deliberately NOT recording lastRun on failure, so the next tick (within the same 20-min
-      // window) retries instead of silently skipping the job for the whole day.
+      // Release the claim so a retry within the same window is still possible instead of silently
+      // skipping the job for the rest of the day.
+      const rollback = await readJSON('cronLastRun.json', {});
+      delete rollback[job.key];
+      await writeJSON('cronLastRun.json', rollback);
     }
   }
 
-  await writeJSON('cronLastRun.json', lastRun);
   res.json({ ok: true, kyivDate: now.date, kyivMinutes: now.minutesSinceMidnight, ran: results });
 });
 

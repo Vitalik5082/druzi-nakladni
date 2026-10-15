@@ -322,7 +322,11 @@ async function executeTool(name, args) {
     // Break-even: COGS and admin salary scale with revenue (both are ~% of revenue), everything
     // else (payroll, rent, utilities, taxes, chemistry...) is treated as fixed per day, averaged
     // over the period. profit(R) = R*(1 - foodCost% - adminPct%) - fixedPerDay = 0 solved for R.
-    const daysCount = cashDays.length;
+    // otherExpenses/payrollTotal are summed over the full from–to CALENDAR range, but cashDays can
+    // have gaps (a day the Каса sync was skipped, a closed day never entered) — dividing by
+    // cashDays.length instead of the actual day count inflates the average fixed cost per day
+    // whenever those counts differ, which silently overstates the stated break-even revenue.
+    const daysCount = Math.max(1, Math.round((new Date(to) - new Date(from)) / 86400000) + 1);
     const avgRevenuePerDay = Number((revenue / daysCount).toFixed(2));
     const avgFixedCostPerDay = Number(((otherExpenses + payrollTotal) / daysCount).toFixed(2));
     const variableRateFraction = (foodCostPct || 0) / 100 + adminPct / 100;
@@ -331,7 +335,7 @@ async function executeTool(name, args) {
       : null;
 
     return {
-      from, to, daysWithCashData: daysCount,
+      from, to, calendarDays: daysCount, daysWithCashData: cashDays.length,
       revenue, cogs, foodCostPct, otherExpenses, payroll: payrollTotal,
       adminPct, adminSalary, profitBeforeAdmin, profitAfterAdmin,
       avgRevenuePerDay, avgFixedCostPerDay, breakevenRevenuePerDay,

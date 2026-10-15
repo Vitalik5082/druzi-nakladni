@@ -54,15 +54,28 @@ function findBestMatch(name) {
   const key = normalize(name);
   if (learnedMatches[key]) return learnedMatches[key];
 
+  // Exact match first. Without this, a generic catalog entry ("Соус Бальзамічний") and the real
+  // match ("Соус Теріякі") could tie on word-overlap score (both share "соус") and whichever sat
+  // earlier in products.json silently won regardless of which was actually right — a real,
+  // hand-fixed mismatch this session. An exact normalized match should never lose to a fuzzier one.
+  const exactIdx = normalizedProducts.indexOf(key);
+  if (exactIdx !== -1) return yourProducts[exactIdx];
+
   const words = key.split(' ').filter(w => w.length > 2);
   let bestMatch = null;
   let bestScore = 0;
+  let bestLen = -1;
 
   for (let i = 0; i < yourProducts.length; i++) {
     const pNorm = normalize(yourProducts[i]);
     let score = 0;
     for (let w of words) if (pNorm.includes(w)) score++;
-    if (score > bestScore) { bestScore = score; bestMatch = yourProducts[i]; }
+    // On a tied score, prefer the more specific (longer) catalog name — "Сир" and "Сир
+    // Моцарелла" both score 1 against an OCR'd "Сир Моцарелла" line; the longer one is the
+    // better match, not whichever happened to come first in the list.
+    if (score > bestScore || (score > 0 && score === bestScore && pNorm.length > bestLen)) {
+      bestScore = score; bestMatch = yourProducts[i]; bestLen = pNorm.length;
+    }
   }
 
   if (bestMatch && bestScore > 0) return bestMatch;

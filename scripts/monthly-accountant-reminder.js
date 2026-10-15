@@ -91,7 +91,7 @@ async function main() {
     for (const r of accountants) {
       try {
         await sendTelegram(r.chatId, text);
-        pending[String(r.chatId)] = targetMonth;
+        pending[String(r.chatId)] = { month: targetMonth, timestamp: new Date().toISOString() };
         console.log('Reminder sent to', r.name, 'for month', targetMonth);
       } catch (err) {
         console.error('Failed to send reminder to', r.name, err.message);

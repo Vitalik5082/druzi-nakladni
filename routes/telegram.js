@@ -271,6 +271,18 @@ async function handleStockText(chatId, text, submittedByLabel) {
     return;
   }
 
+  // handleStockAmountReply splits one ₴ total proportionally by qty across ALL matched items —
+  // valid only when they share a unit. "Борошно 5 кг, Олія 2 л" summing to "7" and splitting by
+  // that is dimensionally meaningless (kg + l isn't a real quantity), and was silently happening
+  // before this check: a real prihid/Poster supply got written with made-up per-unit prices.
+  const distinctUnits = new Set(matched.map(i => i.unit));
+  if (distinctUnits.size > 1) {
+    await reply(chatId,
+      `⚠️ Тут одразу декілька одиниць виміру (${[...distinctUnits].join(', ')}) — суму на все не розділю коректно. ` +
+      `Надішліть, будь ласка, одним повідомленням лише товари з однаковою одиницею виміру (наприклад, спершу всі "кг", потім окремо "л"/"шт").`);
+    return;
+  }
+
   const pending = await readJSON('pendingStockAmount.json', {});
   pending[chatId] = { items: matched, unmatched, rawText: text, submittedBy: submittedByLabel, timestamp: new Date().toISOString() };
   await writeJSON('pendingStockAmount.json', pending);
@@ -469,26 +481,38 @@ router.post('/telegram/webhook', async (req, res) => {
     if (!message.photo || !message.photo.length) {
       if (sender.role === 'waiter' && message.text && message.text.trim() && !message.text.startsWith('/')) {
         const pendingStock = await readJSON('pendingStockAmount.json', {});
-        if (pendingStock[chatId]) {
-          const resolved = await handleStockAmountReply(chatId, message.text.trim(), pendingStock[chatId], recipients);
+        const stockEntry = pendingStock[chatId];
+        // No expiry used to mean a reply to a LONG-forgotten prihid (waiter never answered "на яку
+        // суму?") could hijack an unrelated later message that happens to contain a number —
+        // e.g. "Борошно 10кг" read as the answer "10" to a stale Круасан entry from days ago, and
+        // the real Борошно delivery silently never recorded. 6h covers "got busy, answered later
+        // same shift" without reaching into an unrelated future report.
+        if (stockEntry && (Date.now() - new Date(stockEntry.timestamp).getTime()) < 6 * 60 * 60 * 1000) {
+          const resolved = await handleStockAmountReply(chatId, message.text.trim(), stockEntry, recipients);
           if (resolved) {
             delete pendingStock[chatId];
             await writeJSON('pendingStockAmount.json', pendingStock);
           }
           return res.sendStatus(200);
         }
+        if (stockEntry) { delete pendingStock[chatId]; await writeJSON('pendingStockAmount.json', pendingStock); }
         await handleStockText(chatId, message.text.trim(), submittedByLabel);
         return res.sendStatus(200);
       }
       if (sender.role === 'accountant' && message.text && message.text.trim() && !message.text.startsWith('/')) {
         const pendingReport = await readJSON('pendingAccountantReport.json', {});
-        const month = pendingReport[chatId];
-        if (month) {
+        const reportEntry = pendingReport[chatId];
+        // Same reasoning as pendingStockAmount above — without an expiry, бухгалтер ignoring one
+        // monthly reminder means ANY later message containing recognizable amounts (even about
+        // something unrelated) gets silently attributed to that stale month's tax/utility report.
+        const reportFresh = reportEntry && (Date.now() - new Date(reportEntry.timestamp).getTime()) < 10 * 24 * 60 * 60 * 1000;
+        if (reportFresh) {
           delete pendingReport[chatId];
           await writeJSON('pendingAccountantReport.json', pendingReport);
-          await handleAccountantExpenseText(chatId, message.text.trim(), month);
+          await handleAccountantExpenseText(chatId, message.text.trim(), reportEntry.month);
           return res.sendStatus(200);
         }
+        if (reportEntry) { delete pendingReport[chatId]; await writeJSON('pendingAccountantReport.json', pendingReport); }
       }
       await reply(chatId, sender.role === 'accountant'
         ? 'Надішліть фото чека про оплату — я знайду відповідну накладну за сумою боргу.'
@@ -576,7 +600,9 @@ router.post('/telegram/webhook', async (req, res) => {
     res.sendStatus(200);
   } catch (err) {
     console.error('Telegram webhook error:', err);
-    await reply(chatId, '❌ Помилка обробки накладної: ' + (err.message || 'невідома помилка'));
+    // One catch wraps накладна OCR, Z-звіт, прихід текстом, чек оплати, і звіт бухгалтера — always
+    // blaming "накладна" was misleading whoever's debugging a failure report from any other flow.
+    await reply(chatId, '❌ Помилка обробки повідомлення: ' + (err.message || 'невідома помилка'));
     res.sendStatus(200);
   }
 });

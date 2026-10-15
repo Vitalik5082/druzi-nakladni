@@ -569,6 +569,11 @@ router.post('/products/create-new', async (req, res) => {
   const { name, categoryId, unit, weightIngredient, qty, price, invoiceSupplier, sourceUnit } = req.body;
   if (!name || !unit) return res.status(400).json({ error: 'name and unit required' });
   if (!['kg', 'l', 'p'].includes(unit)) return res.status(400).json({ error: 'unit must be kg, l or p' });
+  // The frontend form already requires this, but the route itself didn't — a direct API call with
+  // unit:'p' and no weight created a malformed Poster ingredient (0 weight_ingredient) silently.
+  if (unit === 'p' && !(Number(weightIngredient) > 0)) {
+    return res.status(400).json({ error: 'weightIngredient required (>0) when unit is p' });
+  }
 
   const scaled = toTargetUnitQtyPrice(sourceUnit, unit, Number(qty) || 0, Number(price) || 0);
 
