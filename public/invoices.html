@@ -118,6 +118,37 @@
     <div class="modal-sub" id="modalSub">Оберіть продукт зі списку</div>
     <input class="modal-search" id="modalSearch" placeholder="Пошук продукту..." oninput="filterProducts()">
     <div class="modal-list" id="modalList"></div>
+
+    <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
+      <a href="#" id="toggleNewProductLink" onclick="toggleNewProductForm(); return false" style="font-size:12px;color:var(--accent)">+ Створити новий товар</a>
+      <div id="newProductForm" style="display:none;margin-top:10px">
+        <div class="form-grid">
+          <div class="form-field">
+            <label for="newProductName">Назва</label>
+            <input class="modal-search" id="newProductName" style="margin:0">
+          </div>
+          <div class="form-field">
+            <label for="newProductCategory">Категорія в Poster</label>
+            <select id="newProductCategory" style="background:var(--bg3);border:1px solid var(--border);border-radius:7px;color:var(--text);padding:8px 10px;font-family:var(--font-mono);font-size:12px;width:100%"></select>
+          </div>
+          <div class="form-field">
+            <label for="newProductUnit">Одиниця</label>
+            <select id="newProductUnit" onchange="toggleNewProductWeight()" style="background:var(--bg3);border:1px solid var(--border);border-radius:7px;color:var(--text);padding:8px 10px;font-family:var(--font-mono);font-size:12px;width:100%">
+              <option value="kg">кг</option>
+              <option value="l">л</option>
+              <option value="p">шт</option>
+            </select>
+          </div>
+          <div class="form-field" id="newProductWeightField" style="display:none">
+            <label for="newProductWeight">Вага 1 шт, г</label>
+            <input class="modal-search" id="newProductWeight" type="number" style="margin:0">
+          </div>
+        </div>
+        <button class="btn sm primary" style="margin-top:6px" onclick="createNewProduct()">Створити й використати тут</button>
+        <div style="font-size:10px;color:var(--text3);margin-top:6px">Кількість і ціна для початкового залишку в Poster беруться з цієї позиції накладної.</div>
+      </div>
+    </div>
+
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Скасувати</button>
       <button class="btn primary" onclick="confirmMatch()">Зберегти</button>
@@ -730,6 +761,22 @@ async function saveInvoiceItems(id) {
 // ── MATCH MODAL (виправити відповідність товару довіднику) ──────────
 let currentModalInvId = null, currentModalItemId = null, selectedProduct = null;
 
+let ingredientCategories = [];
+async function loadIngredientCategories() {
+  try {
+    const res = await authFetch('/api/poster/ingredient-categories');
+    ingredientCategories = await res.json();
+  } catch { ingredientCategories = []; }
+}
+
+// Накладна-side unit codes vs Poster's own (kg/l/p) — used to pre-select a sensible default when
+// offering to create a brand new product from this line.
+function toPosterUnit(invoiceUnit) {
+  if (invoiceUnit === 'kg' || invoiceUnit === 'g') return 'kg';
+  if (invoiceUnit === 'l' || invoiceUnit === 'ml') return 'l';
+  return 'p';
+}
+
 function openMatchModal(invId, itemId) {
   currentModalInvId = invId;
   currentModalItemId = itemId;
@@ -742,6 +789,16 @@ function openMatchModal(invId, itemId) {
   filterProducts();
   document.getElementById('matchModal').classList.add('open');
   setTimeout(() => document.getElementById('modalSearch').focus(), 50);
+
+  document.getElementById('newProductForm').style.display = 'none';
+  document.getElementById('toggleNewProductLink').textContent = '+ Створити новий товар';
+  document.getElementById('newProductName').value = item.original_name || item.name;
+  document.getElementById('newProductUnit').value = toPosterUnit(item.unit);
+  toggleNewProductWeight();
+  const catSelect = document.getElementById('newProductCategory');
+  const techCard = ingredientCategories.find(c => /тех\s*карт/i.test(c.name));
+  catSelect.innerHTML = ingredientCategories.map(c =>
+    `<option value="${c.category_id}" ${techCard && c.category_id === techCard.category_id ? 'selected' : ''}>${escHtml(c.name)}</option>`).join('');
 }
 
 function closeModal() {
@@ -749,6 +806,51 @@ function closeModal() {
   currentModalInvId = null;
   currentModalItemId = null;
   selectedProduct = null;
+}
+
+function toggleNewProductForm() {
+  const form = document.getElementById('newProductForm');
+  const open = form.style.display !== 'none';
+  form.style.display = open ? 'none' : 'block';
+  document.getElementById('toggleNewProductLink').textContent = open ? '+ Створити новий товар' : '− Сховати';
+}
+
+function toggleNewProductWeight() {
+  const isPieces = document.getElementById('newProductUnit').value === 'p';
+  document.getElementById('newProductWeightField').style.display = isPieces ? 'block' : 'none';
+}
+
+async function createNewProduct() {
+  const inv = invoices.find(i => i.id === currentModalInvId);
+  const item = inv && inv.items.find(i => i.id === currentModalItemId);
+  if (!item) return;
+
+  const name = document.getElementById('newProductName').value.trim();
+  const unit = document.getElementById('newProductUnit').value;
+  const categoryId = document.getElementById('newProductCategory').value;
+  const weightIngredient = document.getElementById('newProductWeight').value;
+
+  if (!name) { showToast('Вкажи назву', 'error'); return; }
+  if (unit === 'p' && !weightIngredient) { showToast('Вкажи вагу 1 шт для штучного товару', 'error'); return; }
+
+  try {
+    const res = await authFetch('/api/products/create-new', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name, categoryId, unit, weightIngredient,
+        qty: item.qty, price: item.price, invoiceSupplier: inv.supplier
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '');
+
+    productUnitByName[data.name.toLowerCase()] = data.unit;
+    if (!allProducts.includes(data.name)) allProducts.push(data.name);
+    selectedProduct = data.name;
+    await confirmMatch(); // closes the modal and shows its own save confirmation
+  } catch (err) {
+    showToast(err.message || 'Помилка створення товару', 'error');
+  }
 }
 
 function filterProducts() {
@@ -878,7 +980,7 @@ document.getElementById('newInvoiceModal').addEventListener('click', e => {
 });
 
 (async () => {
-  await Promise.all([loadProducts(), loadSuppliers(), loadProductUnits()]);
+  await Promise.all([loadProducts(), loadSuppliers(), loadProductUnits(), loadIngredientCategories()]);
   await loadInvoices();
 })();
 </script>

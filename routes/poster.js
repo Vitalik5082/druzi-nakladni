@@ -1,5 +1,9 @@
 const express = require('express');
-const { posterCall, ymd, sleep, normalizeModName, localDateStr } = require('../lib/poster');
+const {
+  posterCall, posterCallPost, ymd, sleep, normalizeModName, localDateStr,
+  createPosterSupply, createPosterIngredient, posterDateTimeStr, FALLBACK_POSTER_SUPPLIER_ID
+} = require('../lib/poster');
+const { findSupplier } = require('../lib/convert');
 const { readJSON, writeJSON, nextId } = require('../lib/store');
 
 const router = express.Router();
@@ -534,6 +538,77 @@ router.get('/poster/order-recommendations', async (req, res) => {
 
   items.sort((a, b) => (a.supplierName || '￿').localeCompare(b.supplierName || '￿') || b.recommendedQty - a.recommendedQty);
   res.json({ items });
+});
+
+// ── CREATE A BRAND NEW PRODUCT ────────────────────────────────────
+// Used by invoices.html's "Змінити відповідність" modal when the накладна line is something we've
+// genuinely never bought before — no catalog entry fits because none exists yet. Creates it in
+// BOTH places that need it: our own накладні catalog (products.json, plain name strings) and a real
+// Poster ingredient (so stock/consumption tracking works going forward), then logs the qty/price
+// from THIS накладна line as the ingredient's first-ever supply — Poster has no "set opening stock"
+// field on the ingredient itself, it only derives stock/cost from real supply documents.
+router.get('/poster/ingredient-categories', async (req, res) => {
+  try {
+    res.json(await posterCall('menu.getCategoriesIngredients'));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/products/create-new', async (req, res) => {
+  const { name, categoryId, unit, weightIngredient, qty, price, invoiceSupplier } = req.body;
+  if (!name || !unit) return res.status(400).json({ error: 'name and unit required' });
+  if (!['kg', 'l', 'p'].includes(unit)) return res.status(400).json({ error: 'unit must be kg, l or p' });
+
+  try {
+    const ingredientId = await createPosterIngredient({
+      name, categoryId: Number(categoryId) || 5, unit, weightIngredient: Number(weightIngredient) || undefined
+    });
+
+    // Resolve a real Poster supplier for the opening supply — reuse one already linked to our
+    // накладні supplier record, create it in Poster if that record exists but was never linked yet,
+    // or fall back to the generic correction supplier when we genuinely can't tell.
+    let posterSupplierId = FALLBACK_POSTER_SUPPLIER_ID;
+    if (invoiceSupplier) {
+      const suppliers = await readJSON('suppliers.json', []);
+      const matched = findSupplier(suppliers, invoiceSupplier);
+      if (matched) {
+        if (matched.posterSupplierId) {
+          posterSupplierId = matched.posterSupplierId;
+        } else {
+          const newId = await posterCallPost('storage.createSupplier', { supplier_name: matched.name });
+          matched.posterSupplierId = newId;
+          await writeJSON('suppliers.json', suppliers);
+          posterSupplierId = newId;
+        }
+      }
+    }
+
+    if (Number(qty) > 0) {
+      await createPosterSupply({
+        date: posterDateTimeStr(), supplierId: posterSupplierId,
+        items: [{ ingredientId, qty: Number(qty), sum: Number(price) || 0 }]
+      });
+    }
+
+    const products = await readJSON('products.json', []);
+    if (!products.includes(name)) {
+      products.push(name);
+      await writeJSON('products.json', products);
+    }
+
+    // Keep our own live cache in sync too, so the newly-created product's unit is immediately
+    // usable (e.g. invoices.html's product-reassignment unit lookup) without waiting for the next
+    // /poster/sync-ingredients run.
+    const cache = await readJSON('posterIngredients.json', {});
+    cache[ingredientId] = { left: Number(qty) || 0, name, unit, syncedAt: new Date().toISOString(), ingredient_id: ingredientId };
+    await writeJSON('posterIngredients.json', cache);
+
+    res.json({ name, unit, ingredientId });
+  } catch (err) {
+    console.error('create-new product failed:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 module.exports = router;
