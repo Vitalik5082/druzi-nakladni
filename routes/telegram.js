@@ -6,7 +6,7 @@
 const express = require('express');
 const Fuse = require('fuse.js');
 const { readJSON, writeJSON, nextId } = require('../lib/store');
-const { normalize } = require('../lib/convert');
+const { normalize, findSupplier } = require('../lib/convert');
 const { localDateStr, posterCall, createPosterSupply, posterDateTimeStr } = require('../lib/poster');
 const { recognizeInvoiceImage, recognizeReceiptImage, recognizeStockText, recognizeExpenseText } = require('./recognition');
 const { createInvoice, updateInvoice } = require('./invoices');
@@ -58,18 +58,6 @@ async function askPaymentStatus(chatId, invoiceId) {
       ]] }
     });
   } catch (e) { console.error('Telegram reply failed:', e); }
-}
-
-// Fuzzy-ish: exact normalized match first, then substring either direction (OCR'd supplier names
-// rarely match the saved name byte-for-byte — extra legal-entity suffixes, abbreviations, etc).
-// Matches against ALL suppliers, not just telegramInvoicesAllowed ones — the server accepts every
-// накладна regardless; that flag only decides who gets notified (see webhook handler below).
-function findSupplier(suppliers, guessName) {
-  if (!guessName) return null;
-  const key = normalize(guessName);
-  let match = suppliers.find(s => normalize(s.name) === key);
-  if (!match) match = suppliers.find(s => key.includes(normalize(s.name)) || normalize(s.name).includes(key));
-  return match || null;
 }
 
 // paidAmount tracks real cash handed to the supplier, which is always the GROSS (з ПДВ) figure —

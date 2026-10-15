@@ -4,7 +4,7 @@ const Fuse = require('fuse.js');
 const path = require('path');
 const express = require('express');
 const multer = require('multer');
-const { convertItem, normalize } = require('../lib/convert');
+const { convertItem, normalize, findSupplier } = require('../lib/convert');
 const { readJSON, writeJSON } = require('../lib/store');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -233,7 +233,17 @@ async function recognizeInvoiceImage(imageBase64, mimeType) {
     warning = `Сума розпізнаних позицій (${itemsSum.toFixed(2)} ₴) не збігається з сумою накладної (${aiInvoiceTotal.toFixed(2)} ₴) — перевір вручну, AI міг пропустити рядок або помилитись.`;
   }
 
-  const supplier = aiSupplier || (await suggestSupplier(mapped)) || '';
+  let supplier = aiSupplier || (await suggestSupplier(mapped)) || '';
+
+  // The AI reads whatever legal name is printed on the invoice verbatim ("ФОП Проценко Олена
+  // Михайлівна") — snap it to an existing saved supplier first, or every full-legal-name variant
+  // of the same real supplier silently creates a new duplicate (createInvoice()'s ensureSupplier()
+  // has no way to know they're the same business once the raw string reaches it).
+  if (supplier) {
+    const suppliers = await readJSON('suppliers.json', []);
+    const matched = findSupplier(suppliers, supplier);
+    if (matched) supplier = matched.name;
+  }
 
   return { items: mapped, count: mapped.length, supplier, date: aiDate, warning };
 }
