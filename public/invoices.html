@@ -345,7 +345,9 @@ function renderInvoiceRow(inv) {
                   ? `<input type="number" step="any" class="item-price-input" style="width:90px;text-align:right" value="${i.price||0}" oninput="recalcItemRow(${inv.id}, ${i.id})">`
                   : (i.price||0).toFixed(2) + ' ₴'}</td>
                 <td style="text-align:right" class="item-price-vat-cell">${(i.price_with_vat || i.price*1.2 || 0).toFixed(2)} ₴</td>
-                <td style="text-align:right" class="total-cell item-total-cell">${(i.total_with_vat || i.total*1.2 || 0).toFixed(2)} ₴</td>
+                <td style="text-align:right${isEditing ? '' : ';cursor:pointer'}" class="total-cell item-total-cell"
+                  ${isEditing ? '' : `onclick="event.stopPropagation(); startEditTotalWithVat(${inv.id}, ${i.id}, this)" title="Натисніть, щоб відредагувати суму з ПДВ — ціна без ПДВ перерахується автоматично"`}
+                >${(i.total_with_vat || i.total*1.2 || 0).toFixed(2)} ₴</td>
                 <td style="text-align:center">
                   <input type="checkbox" class="item-chem-check" ${i.isChemistry ? 'checked' : ''}
                     onclick="event.stopPropagation()"
@@ -472,6 +474,60 @@ function addItemRow(invId) {
 
 // Quick-toggle outside of edit mode — doesn't touch qty/price, just flips the one flag and saves
 // immediately (updateInvoice recomputes totals off the item's own existing qty/price, a no-op).
+// Quick inline edit of "Сума (з ПДВ)" directly in the table — no need to open full row-edit mode.
+// updateInvoice() on the backend always derives total_with_vat = total * 1.2 and recomputes price
+// from qty+price it's given, so editing the gross total just means solving backwards for the net
+// per-unit price: price = (newTotalWithVat / 1.2) / qty.
+function startEditTotalWithVat(invId, itemId, cellEl) {
+  if (cellEl.querySelector('input')) return; // already editing
+  const inv = invoices.find(i => i.id === invId);
+  const item = inv && inv.items.find(it => it.id === itemId);
+  if (!item) return;
+
+  const current = (item.total_with_vat || item.total * 1.2 || 0).toFixed(2);
+  cellEl.innerHTML = `<input type="number" step="any" class="price-input" style="width:100px;text-align:right" value="${current}">`;
+  const input = cellEl.querySelector('input');
+  input.focus();
+  input.select();
+
+  const finish = () => saveTotalWithVat(invId, itemId, input.value, cellEl, current);
+  input.addEventListener('blur', finish, { once: true });
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') input.blur();
+    if (e.key === 'Escape') { input.removeEventListener('blur', finish); cellEl.textContent = current + ' ₴'; }
+  });
+}
+
+async function saveTotalWithVat(invId, itemId, rawValue, cellEl, previousDisplay) {
+  const newTotalWithVat = parseFloat(rawValue);
+  const inv = invoices.find(i => i.id === invId);
+  const item = inv && inv.items.find(it => it.id === itemId);
+  if (!item || isNaN(newTotalWithVat) || newTotalWithVat < 0) {
+    cellEl.textContent = previousDisplay + ' ₴';
+    return;
+  }
+
+  const qty = Number(item.qty) || 0;
+  const newPrice = qty > 0 ? (newTotalWithVat / 1.2) / qty : 0;
+  const items = inv.items.map(it => it.id === itemId ? { ...it, price: newPrice } : it);
+
+  try {
+    const res = await authFetch(`/api/invoices/${invId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items })
+    });
+    if (!res.ok) throw new Error();
+    const updated = await res.json();
+    Object.assign(inv, updated);
+    render();
+    showToast('✓ Суму оновлено', 'success');
+  } catch {
+    showToast('Помилка збереження', 'error');
+    cellEl.textContent = previousDisplay + ' ₴';
+  }
+}
+
 async function toggleItemChemistry(invId, itemId, checked) {
   const inv = invoices.find(i => i.id === invId);
   if (!inv) return;
