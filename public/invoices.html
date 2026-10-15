@@ -264,12 +264,13 @@ function render() {
     const list = bySupplier[supplier].sort((a, b) => b.date.localeCompare(a.date));
     const supplierTotal = list.reduce((s, i) => s + (i.total || 0), 0);
     const supplierDebt = list.reduce((s, i) => s + Math.max(0, grossOf(i)-(i.paidAmount||0)), 0);
+    const hasUnconfirmed = list.some(i => i.pendingReview);
     const isOpen = openFolders.has(supplier);
 
     return `
     <div class="supplier-card ${isOpen ? 'open' : ''}" data-supplier="${escHtml(supplier)}">
       <div class="supplier-head" onclick="toggleFolder('${escAttr(supplier)}')">
-        <div class="supplier-name">${escHtml(supplier)} <span class="chevron">▸</span></div>
+        <div class="supplier-name">${hasUnconfirmed ? '<span style="color:var(--warn)" title="Є непідтверджені накладні">⚠️</span> ' : ''}${escHtml(supplier)} <span class="chevron">▸</span></div>
         <div class="supplier-meta">
           <span>${list.length} накл.</span>
           <span>${supplierTotal.toFixed(2)} ₴</span>
