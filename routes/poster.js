@@ -561,9 +561,17 @@ router.post('/products/create-new', async (req, res) => {
   if (!['kg', 'l', 'p'].includes(unit)) return res.status(400).json({ error: 'unit must be kg, l or p' });
 
   try {
-    const ingredientId = await createPosterIngredient({
-      name, categoryId: Number(categoryId) || 5, unit, weightIngredient: Number(weightIngredient) || undefined
-    });
+    let ingredientId;
+    try {
+      ingredientId = await createPosterIngredient({
+        name, categoryId: Number(categoryId) || 5, unit, weightIngredient: Number(weightIngredient) || undefined
+      });
+    } catch (err) {
+      // "ingredient_name is already exist" — Poster hands back the existing ingredient's id right
+      // on the error (item_id), so this is just "use the one that's already there", not a failure.
+      if (err.item_id) ingredientId = err.item_id;
+      else throw err;
+    }
 
     // Resolve a real Poster supplier for the opening supply — reuse one already linked to our
     // накладні supplier record, create it in Poster if that record exists but was never linked yet,
