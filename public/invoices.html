@@ -940,11 +940,24 @@ async function confirmReview(id) {
       body: JSON.stringify({ pendingReview: false })
     });
     if (!res.ok) throw new Error();
-    showToast('✓ Підтверджено', 'success');
+    const data = await res.json();
+    showToast(describePosterPush(data.posterPush, '✓ Підтверджено'), data.posterPush?.error ? 'error' : 'success', 6000);
     loadInvoices();
   } catch {
     showToast('Помилка збереження', 'error');
   }
+}
+
+// posterPush comes from lib/poster.js's pushInvoiceToPoster — surfaces how many lines actually
+// updated Poster's own ingredient cost vs. how many were skipped (no matching Poster ingredient
+// yet, so Poster's cost basis for that item stays whatever it was before this накладна).
+function describePosterPush(push, prefix) {
+  if (!push) return prefix;
+  if (push.error) return `${prefix}, але в Poster не потрапило: ${push.error}`;
+  const parts = [`${push.pushedCount} поз. → Poster`];
+  if (push.skippedNew?.length) parts.push(`${push.skippedNew.length} не знайдено в Poster (${push.skippedNew.slice(0, 3).join(', ')}${push.skippedNew.length > 3 ? '…' : ''})`);
+  if (push.failedCount) parts.push(`${push.failedCount} з помилкою`);
+  return `${prefix} — ${parts.join(', ')}`;
 }
 
 function escHtml(s) {

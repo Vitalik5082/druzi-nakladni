@@ -1,7 +1,7 @@
 const express = require('express');
 const { readJSON, writeJSON, nextId } = require('../lib/store');
 const { normalize, VAT_RATE } = require('../lib/convert');
-const { localDateStr } = require('../lib/poster');
+const { localDateStr, pushInvoiceToPoster } = require('../lib/poster');
 
 const router = express.Router();
 const FILE = 'invoices.json';
@@ -119,6 +119,21 @@ async function createInvoice({ supplier, date, items, dueDate, force, source, su
     createdAt: new Date().toISOString()
   };
 
+  // A накладна that ISN'T pending has already been reviewed by a human before this call ran — the
+  // website flow (photo-OCR or manual entry) only calls createInvoice() once the admin clicks
+  // "Зберегти" after checking/editing the extracted items, so there's no separate approval step to
+  // wait for. A pending one (Telegram OCR, text-прихід) hasn't been looked at by anyone yet — its
+  // push happens later, in updateInvoice(), when pendingReview flips to false via "✓ Підтвердити".
+  if (!invoice.pendingReview) {
+    try {
+      invoice.posterPush = await pushInvoiceToPoster(invoice);
+    } catch (err) {
+      console.error('createInvoice: pushInvoiceToPoster failed:', err);
+      invoice.posterPush = { error: err.message };
+    }
+    invoice.postedToPoster = true;
+  }
+
   invoices.push(invoice);
   await writeJSON(FILE, invoices);
   await ensureSupplier(invoice.supplier);
@@ -186,6 +201,8 @@ async function updateInvoice(id, { paidAmount, paidDate, dueDate, supplier, date
     }
   }
 
+  const wasPending = !!invoice.pendingReview;
+
   if (paidAmount !== undefined) invoice.paidAmount = Number(paidAmount) || 0;
   if (paidDate !== undefined) invoice.paidDate = paidDate;
   if (dueDate !== undefined) invoice.dueDate = dueDate;
@@ -210,6 +227,20 @@ async function updateInvoice(id, { paidAmount, paidDate, dueDate, supplier, date
     });
     invoice.total = Number(invoice.items.filter(i => !i.skipped).reduce((s, i) => s + (i.total || 0), 0).toFixed(2));
     invoice.total_with_vat = Number((invoice.total * VAT_RATE).toFixed(2));
+  }
+
+  // The накладна just moved from "nobody's looked at it" to "admin clicked ✓ Підтвердити" — this
+  // is the first point a Telegram-sourced (OCR photo / text-прихід) накладна is safe to push into
+  // Poster as a real supply. guarded by postedToPoster so a накладна that's somehow re-confirmed
+  // (or edited again after confirming) never pushes the same items twice.
+  if (wasPending && invoice.pendingReview === false && !invoice.postedToPoster) {
+    try {
+      invoice.posterPush = await pushInvoiceToPoster(invoice);
+    } catch (err) {
+      console.error('updateInvoice: pushInvoiceToPoster failed:', err);
+      invoice.posterPush = { error: err.message };
+    }
+    invoice.postedToPoster = true;
   }
 
   await writeJSON(FILE, invoices);

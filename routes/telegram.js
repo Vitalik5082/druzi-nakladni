@@ -7,7 +7,7 @@ const express = require('express');
 const Fuse = require('fuse.js');
 const { readJSON, writeJSON, nextId } = require('../lib/store');
 const { normalize, findSupplier } = require('../lib/convert');
-const { localDateStr, posterCall, createPosterSupply, posterDateTimeStr } = require('../lib/poster');
+const { localDateStr, posterCall } = require('../lib/poster');
 const { recognizeInvoiceImage, recognizeReceiptImage, recognizeStockText, recognizeExpenseText } = require('./recognition');
 const { createInvoice, updateInvoice } = require('./invoices');
 const { createExpenseRecord } = require('./expenses');
@@ -15,10 +15,6 @@ const { createExpenseRecord } = require('./expenses');
 const router = express.Router();
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const FILE = 'invoices.json';
-// Poster supplier created once via storage.createSupplier specifically for text-reported receipts
-// whose ingredient has no (or an ambiguous) supplier assignment in "Постачальники товарів" —
-// supplier_id 4 in this Poster account ("Telegram-прихід (без визначеного постачальника)").
-const FALLBACK_SUPPLIER_ID = 4;
 // Keep in sync with public/expenses.html's category <option> list.
 const EXPENSE_CATEGORIES = [
   'Оренда', 'Комуналка', 'Інтернет', 'Податки', 'Сміття', 'Підписки',
@@ -344,42 +340,23 @@ async function handleStockAmountReply(chatId, text, pendingEntry, recipients) {
   }
   const inv = created.invoice;
 
-  const date = posterDateTimeStr();
-  const groups = new Map(); // posterSupplierId -> { supplierName, items: [] }
-  for (const i of items) {
-    const supplierIds = productSuppliers[i.ingredientId]?.supplierIds || [];
-    const rec = supplierIds.length === 1 ? suppliers.find(s => s.id === supplierIds[0]) : null;
-    const posterSupplierId = rec?.posterSupplierId || FALLBACK_SUPPLIER_ID;
-    if (!groups.has(posterSupplierId)) groups.set(posterSupplierId, { supplierName: rec ? rec.name : null, items: [] });
-    groups.get(posterSupplierId).items.push(i);
-  }
-
-  const failedGroups = [];
-  for (const [posterSupplierId, group] of groups) {
-    try {
-      await createPosterSupply({
-        date, supplierId: posterSupplierId,
-        items: group.items.map(i => ({ ingredientId: i.ingredientId, qty: i.qty, sum: unitPrice }))
-      });
-    } catch (e) {
-      console.error('createPosterSupply failed:', e);
-      failedGroups.push(group);
-    }
-  }
-
+  // No Poster push here — this накладна is pendingReview:true, same as any OCR'd накладна from a
+  // photo. It only reaches Poster once an admin reviews and confirms it from the реєстр накладних
+  // (routes/invoices.js's updateInvoice() does the push, triggered by pendingReview flipping to
+  // false), exactly like the photo-OCR flow. Nobody but the waiter has looked at this yet — pushing
+  // it into Poster's real stock/cost immediately, before any review, was the original design flaw.
   const log = await readJSON('textSupplies.json', []);
   log.push({
     id: nextId(log), date: localDateStr(), timestamp: new Date().toISOString(), submittedBy,
     rawText, amount, invoiceId: inv.id,
     matched: items.map(i => ({ name: i.name, rawName: i.rawName, qty: i.qty, unit: i.unit })),
-    unmatched, failed: failedGroups.length > 0
+    unmatched
   });
   await writeJSON('textSupplies.json', log);
 
   const grossTotal = inv.total_with_vat || inv.total * 1.2;
-  const lines = [`✅ Прихід записано як накладна на ${grossTotal.toFixed(2)} ₴:`];
+  const lines = [`✅ Прихід записано як накладна на ${grossTotal.toFixed(2)} ₴ (очікує підтвердження в реєстрі накладних):`];
   items.forEach(i => lines.push(`• ${i.name}: ${i.qty} ${i.unit}`));
-  if (failedGroups.length) lines.push('', '⚠️ Частину не вдалось записати в Poster — перевірте вручну.');
   await reply(chatId, lines.join('\n'));
 
   await askPaymentStatus(chatId, inv.id);

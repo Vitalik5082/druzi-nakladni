@@ -625,7 +625,7 @@ async function saveInvoice(force, skipNewProductCheck) {
     }
     if (!res.ok) throw new Error(data.error || '');
 
-    showToast('✓ Накладну збережено в реєстрі', 'success');
+    showToast(describePosterPush(data.posterPush, '✓ Накладну збережено в реєстрі'), data.posterPush?.error ? 'error' : 'success', 6000);
     fetchSuppliers();
 
     const grossTotal = data.total_with_vat || data.total * 1.2;
@@ -680,11 +680,23 @@ function setWarning(msg) {
   box.style.display = msg ? 'block' : 'none';
 }
 
-function showToast(msg, type = '') {
+function showToast(msg, type = '', duration = 3000) {
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.className = `toast ${type} show`;
-  setTimeout(() => t.classList.remove('show'), 3000);
+  setTimeout(() => t.classList.remove('show'), duration);
+}
+
+// posterPush comes from lib/poster.js's pushInvoiceToPoster — surfaces how many lines actually
+// updated Poster's own ingredient cost vs. how many were skipped (no matching Poster ingredient
+// yet, so Poster's cost basis for that item stays whatever it was before this накладна).
+function describePosterPush(push, prefix) {
+  if (!push) return prefix;
+  if (push.error) return `${prefix}, але в Poster не потрапило: ${push.error}`;
+  const parts = [`${push.pushedCount} поз. → Poster`];
+  if (push.skippedNew?.length) parts.push(`${push.skippedNew.length} не знайдено в Poster (${push.skippedNew.slice(0, 3).join(', ')}${push.skippedNew.length > 3 ? '…' : ''})`);
+  if (push.failedCount) parts.push(`${push.failedCount} з помилкою`);
+  return `${prefix} — ${parts.join(', ')}`;
 }
 
 function escHtml(s) {

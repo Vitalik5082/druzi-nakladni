@@ -3,7 +3,7 @@ const {
   posterCall, posterCallPost, ymd, sleep, normalizeModName, localDateStr,
   createPosterSupply, createPosterIngredient, posterDateTimeStr, FALLBACK_POSTER_SUPPLIER_ID
 } = require('../lib/poster');
-const { findSupplier } = require('../lib/convert');
+const { findSupplier, toTargetUnitQtyPrice } = require('../lib/convert');
 const { readJSON, writeJSON, nextId } = require('../lib/store');
 
 const router = express.Router();
@@ -555,15 +555,6 @@ router.get('/poster/ingredient-categories', async (req, res) => {
   }
 });
 
-// накладна items are stored internally in g/ml (not kg/l) — bitten by this exact mismatch once
-// already this session (250g silently became 250kg): the new Poster ingredient's unit is kg/l, so
-// a накладна item whose OWN unit is the finer-grained g/ml must have its qty divided by 1000 and
-// price multiplied by 1000 before becoming a supply, or the stock comes out 1000x too high.
-function toTargetUnitQtyPrice(sourceUnit, targetUnit, qty, price) {
-  const scalesDown = (sourceUnit === 'g' && targetUnit === 'kg') || (sourceUnit === 'ml' && targetUnit === 'l');
-  if (!scalesDown) return { qty, price };
-  return { qty: qty / 1000, price: price * 1000 };
-}
 
 router.post('/products/create-new', async (req, res) => {
   const { name, categoryId, unit, weightIngredient, qty, price, invoiceSupplier, sourceUnit } = req.body;
