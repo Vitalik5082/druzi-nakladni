@@ -225,11 +225,11 @@ async function handleZReportPhoto(chatId, fileId, submittedByLabel, recipients) 
 
 // Free-text goods-receipt report from a waiter ("Круасан 8 шт, Булочки 50шт") — no fixed format,
 // no photo. AI extracts {name, qty, unit} triples, each matched against the LIVE Poster ingredient
-// catalog (exact normalized match, then fuzzy via Fuse.js). Matched items are grouped by whichever
-// supplier is assigned to that ingredient on "Постачальники товарів" (productSuppliers.json) and
-// pushed to Poster as a real supply document per supplier group — ambiguous/unassigned ingredients
-// fall back to FALLBACK_SUPPLIER_ID so the stock still updates, flagged in the log for manual fixup.
-async function handleStockText(chatId, text, submittedByLabel, recipients) {
+// catalog (exact normalized match, then fuzzy via Fuse.js). Matching alone has no price — the sum
+// is asked as a follow-up question (handleStockAmountReply) so this can become a real накладна
+// (debt/payment tracking, same "оплачено?" buttons as a photographed накладна), not just a
+// quantity-only stock bump.
+async function handleStockText(chatId, text, submittedByLabel) {
   await reply(chatId, '📝 Розпізнаю прихід...');
 
   let parsed;
@@ -269,69 +269,113 @@ async function handleStockText(chatId, text, submittedByLabel, recipients) {
     return;
   }
 
+  const pending = await readJSON('pendingStockAmount.json', {});
+  pending[chatId] = { items: matched, unmatched, rawText: text, submittedBy: submittedByLabel, timestamp: new Date().toISOString() };
+  await writeJSON('pendingStockAmount.json', pending);
+
+  const lines = ['Розпізнав:'];
+  matched.forEach(i => lines.push(`• ${i.name}: ${i.qty} ${i.unit}`));
+  if (unmatched.length) {
+    lines.push('', '❓ Не впізнав (не увійде в накладну):');
+    unmatched.forEach(i => lines.push(`• ${i.name} ${i.qty} ${i.unit}`));
+  }
+  lines.push('', '💰 На яку суму (всього), ₴? Напишіть, будь ласка, число.');
+  await reply(chatId, lines.join('\n'));
+}
+
+// Follow-up to handleStockText — the waiter's reply is expected to be just a number (total ₴ paid
+// or owed). No per-item pricing exists for a text-reported прихід, so price is split evenly by
+// quantity across the matched items (qty_i / totalQty × amount) — an approximation, correctable
+// later via the накладна's own "Редагувати" on the website, same as any OCR'd накладна.
+async function handleStockAmountReply(chatId, text, pendingEntry, recipients) {
+  const amount = parseFloat((text || '').replace(',', '.').replace(/[^\d.]/g, ''));
+  if (!amount || amount <= 0) {
+    await reply(chatId, '⚠️ Не зрозумів суму. Напишіть, будь ласка, просто число, наприклад: 1200');
+    return false; // keep the pending entry — let them try again
+  }
+
+  const { items, unmatched, submittedBy, rawText } = pendingEntry;
+  const totalQty = items.reduce((s, i) => s + i.qty, 0);
+  const unitPrice = amount / totalQty;
+
+  const invoiceItems = items.map((i, idx) => ({
+    id: idx, name: i.name, original_name: i.rawName, qty: i.qty, unit: i.unit,
+    price: Number(unitPrice.toFixed(4)), total: Number((i.qty * unitPrice).toFixed(2)),
+    matched: true, isNewProduct: false, skipped: false
+  }));
+
   const productSuppliers = await readJSON('productSuppliers.json', {});
   const suppliers = await readJSON('suppliers.json', []);
 
-  const groups = new Map(); // posterSupplierId -> { supplierName, items: [] }
-  for (const item of matched) {
-    const assignment = productSuppliers[item.ingredientId];
-    const supplierIds = (assignment && assignment.supplierIds) || [];
-    const supplierRecord = supplierIds.length === 1 ? suppliers.find(s => s.id === supplierIds[0]) : null;
-    const posterSupplierId = (supplierRecord && supplierRecord.posterSupplierId) || FALLBACK_SUPPLIER_ID;
-    if (!groups.has(posterSupplierId)) groups.set(posterSupplierId, { supplierName: supplierRecord ? supplierRecord.name : null, items: [] });
-    groups.get(posterSupplierId).items.push(item);
+  // Supplier for the накладна record: only when every matched ingredient agrees on exactly one.
+  const supplierIdSets = items.map(i => (productSuppliers[i.ingredientId]?.supplierIds) || []);
+  const firstSet = supplierIdSets[0] || [];
+  const sameSupplierEverywhere = firstSet.length === 1 && supplierIdSets.every(s => s.length === 1 && s[0] === firstSet[0]);
+  const supplierRecord = sameSupplierEverywhere ? suppliers.find(s => s.id === firstSet[0]) : null;
+
+  const created = await createInvoice({
+    supplier: supplierRecord ? supplierRecord.name : '',
+    date: localDateStr(),
+    items: invoiceItems,
+    source: 'telegram-text',
+    submittedBy,
+    pendingReview: true
+  });
+
+  if (created.duplicate) {
+    await reply(chatId,
+      `⚠️ Схожа накладна вже є в системі (${created.existing.supplier}, ${created.existing.date}, ` +
+      `${(created.existing.total_with_vat || created.existing.total * 1.2).toFixed(2)} ₴). Не додав повторно.`);
+    return true;
   }
+  const inv = created.invoice;
 
   const date = posterDateTimeStr();
-  const createdGroups = [];
+  const groups = new Map(); // posterSupplierId -> { supplierName, items: [] }
+  for (const i of items) {
+    const supplierIds = productSuppliers[i.ingredientId]?.supplierIds || [];
+    const rec = supplierIds.length === 1 ? suppliers.find(s => s.id === supplierIds[0]) : null;
+    const posterSupplierId = rec?.posterSupplierId || FALLBACK_SUPPLIER_ID;
+    if (!groups.has(posterSupplierId)) groups.set(posterSupplierId, { supplierName: rec ? rec.name : null, items: [] });
+    groups.get(posterSupplierId).items.push(i);
+  }
+
   const failedGroups = [];
   for (const [posterSupplierId, group] of groups) {
     try {
-      const supplyId = await createPosterSupply({
+      await createPosterSupply({
         date, supplierId: posterSupplierId,
-        items: group.items.map(i => ({ ingredientId: i.ingredientId, qty: i.qty, sum: 0 }))
+        items: group.items.map(i => ({ ingredientId: i.ingredientId, qty: i.qty, sum: unitPrice }))
       });
-      createdGroups.push({ posterSupplierId, supplyId, ...group });
     } catch (e) {
       console.error('createPosterSupply failed:', e);
-      failedGroups.push({ posterSupplierId, ...group });
+      failedGroups.push(group);
     }
   }
 
   const log = await readJSON('textSupplies.json', []);
-  const entry = {
-    id: nextId(log),
-    date: localDateStr(),
-    timestamp: new Date().toISOString(),
-    submittedBy: submittedByLabel,
-    rawText: text,
-    matched: matched.map(i => ({ name: i.name, rawName: i.rawName, qty: i.qty, unit: i.unit })),
-    unmatched,
-    failed: failedGroups.length > 0
-  };
-  log.push(entry);
+  log.push({
+    id: nextId(log), date: localDateStr(), timestamp: new Date().toISOString(), submittedBy,
+    rawText, amount, invoiceId: inv.id,
+    matched: items.map(i => ({ name: i.name, rawName: i.rawName, qty: i.qty, unit: i.unit })),
+    unmatched, failed: failedGroups.length > 0
+  });
   await writeJSON('textSupplies.json', log);
 
-  const lines = ['✅ Прихід записано:'];
-  for (const g of createdGroups) {
-    for (const i of g.items) {
-      lines.push(`• ${i.name}: ${i.qty} ${i.unit}${g.supplierName ? '' : ' (постачальник не визначений — перевірте "Постачальники товарів")'}`);
-    }
-  }
-  for (const g of failedGroups) {
-    for (const i of g.items) lines.push(`⚠️ ${i.name}: ${i.qty} ${i.unit} — НЕ вдалось записати в Poster`);
-  }
-  if (unmatched.length) {
-    lines.push('', '❓ Не впізнав:');
-    unmatched.forEach(i => lines.push(`• ${i.name} ${i.qty} ${i.unit}`));
-  }
+  const grossTotal = inv.total_with_vat || inv.total * 1.2;
+  const lines = [`✅ Прихід записано як накладна на ${grossTotal.toFixed(2)} ₴:`];
+  items.forEach(i => lines.push(`• ${i.name}: ${i.qty} ${i.unit}`));
+  if (failedGroups.length) lines.push('', '⚠️ Частину не вдалось записати в Poster — перевірте вручну.');
   await reply(chatId, lines.join('\n'));
+
+  await askPaymentStatus(chatId, inv.id);
 
   const toNotify = recipients.filter(r => ['admin', 'accountant'].includes(r.role) && String(r.chatId) !== chatId);
   for (const r of toNotify) {
     await reply(r.chatId,
-      `📦 Прихід текстом від ${submittedByLabel}:\n${matched.map(i => `${i.name}: ${i.qty} ${i.unit}`).join('\n')}`);
+      `📦 Прихід текстом від ${submittedBy} (${grossTotal.toFixed(2)} ₴):\n${items.map(i => `${i.name}: ${i.qty} ${i.unit}`).join('\n')}`);
   }
+  return true;
 }
 
 // Бухгалтер's reply to the 15th-of-month reminder (scripts/monthly-accountant-reminder.js) —
@@ -422,7 +466,16 @@ router.post('/telegram/webhook', async (req, res) => {
 
     if (!message.photo || !message.photo.length) {
       if (sender.role === 'waiter' && message.text && message.text.trim() && !message.text.startsWith('/')) {
-        await handleStockText(chatId, message.text.trim(), submittedByLabel, recipients);
+        const pendingStock = await readJSON('pendingStockAmount.json', {});
+        if (pendingStock[chatId]) {
+          const resolved = await handleStockAmountReply(chatId, message.text.trim(), pendingStock[chatId], recipients);
+          if (resolved) {
+            delete pendingStock[chatId];
+            await writeJSON('pendingStockAmount.json', pendingStock);
+          }
+          return res.sendStatus(200);
+        }
+        await handleStockText(chatId, message.text.trim(), submittedByLabel);
         return res.sendStatus(200);
       }
       if (sender.role === 'accountant' && message.text && message.text.trim() && !message.text.startsWith('/')) {
