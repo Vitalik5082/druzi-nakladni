@@ -47,7 +47,12 @@ const JOBS = [
 ];
 
 router.all('/cron/tick', async (req, res) => {
-  const provided = (req.headers['x-cron-secret'] || (req.headers.authorization || '').replace(/^Bearer /, ''));
+  // Accept the secret via header (GitHub Actions) OR a query param (?secret=...) — some free
+  // cron-ping services (cron-job.org etc.) make custom headers awkward to configure, but every
+  // one of them can hit a plain URL.
+  const provided = req.headers['x-cron-secret']
+    || (req.headers.authorization || '').replace(/^Bearer /, '')
+    || req.query.secret;
   if (!process.env.CRON_SECRET || provided !== process.env.CRON_SECRET) {
     return res.sendStatus(401);
   }
