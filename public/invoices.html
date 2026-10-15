@@ -188,6 +188,19 @@ async function loadProducts() {
   } catch { allProducts = []; }
 }
 
+// name (lowercased) -> canonical unit ('kg'/'l'/'p'/...), from Poster's own ingredient list — the
+// unit genuinely belongs to the PRODUCT, not to whatever the накладна line's original OCR guessed,
+// so reassigning an item's matched product (confirmMatch) should pull this in, not just rename.
+let productUnitByName = {};
+async function loadProductUnits() {
+  try {
+    const res = await authFetch('/api/poster/ingredients');
+    const list = await res.json();
+    productUnitByName = {};
+    list.forEach(i => { if (i.name && i.unit) productUnitByName[i.name.toLowerCase()] = i.unit; });
+  } catch { productUnitByName = {}; }
+}
+
 let allSuppliers = [];
 async function loadSuppliers() {
   try {
@@ -770,9 +783,19 @@ async function confirmMatch() {
   const item = inv && inv.items.find(i => i.id === currentModalItemId);
   if (!item) return;
 
-  const items = inv.items.map(i => i.id === currentModalItemId
-    ? { ...i, name: selectedProduct, matched: true, isNewProduct: false }
-    : i);
+  // The unit belongs to the product first — "Соус Теріякі" (ml) renamed to "Борошно" (kg) must not
+  // keep the sauce's unit. Look up the newly-picked product's real unit (Poster's own ingredient
+  // list) and swap the label. Deliberately NOT auto-converting the qty NUMBER — the накладна line's
+  // original_name describes the OLD product, so there's no valid "1850 ml of sauce = X kg of flour"
+  // conversion when the two are different substances; silently computing one risks a confidently
+  // wrong number (tested: came out as 3422 kg). The ₴ total is untouched either way, so money stays
+  // correct — just flag that qty needs a manual look when the unit actually changed.
+  let updatedFields = { name: selectedProduct, matched: true, isNewProduct: false };
+  const newUnit = productUnitByName[selectedProduct.toLowerCase()];
+  const unitChanged = newUnit && newUnit !== item.unit;
+  if (unitChanged) updatedFields.unit = newUnit;
+
+  const items = inv.items.map(i => i.id === currentModalItemId ? { ...i, ...updatedFields } : i);
 
   try {
     await authFetch('/learn', {
@@ -785,7 +808,9 @@ async function confirmMatch() {
     });
     if (!res.ok) throw new Error();
     closeModal();
-    showToast('✓ Відповідність збережено', 'success');
+    showToast(unitChanged
+      ? `✓ Збережено — одиницю змінено на "${newUnit}", перевір кількість вручну (сума ₴ не зачеплена)`
+      : '✓ Відповідність збережено', unitChanged ? '' : 'success');
     loadInvoices();
   } catch {
     showToast('Помилка збереження', 'error');
@@ -853,7 +878,7 @@ document.getElementById('newInvoiceModal').addEventListener('click', e => {
 });
 
 (async () => {
-  await Promise.all([loadProducts(), loadSuppliers()]);
+  await Promise.all([loadProducts(), loadSuppliers(), loadProductUnits()]);
   await loadInvoices();
 })();
 </script>
