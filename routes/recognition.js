@@ -132,8 +132,16 @@ async function suggestSupplier(items) {
 }
 
 const INVOICE_PROMPT = `Extract invoice data from this Ukrainian invoice (накладна) image.
+
+FIRST check what kind of document this actually is — a waiter sometimes photographs the wrong thing,
+most commonly a cash register's Z-звіт (fiscal end-of-shift report) instead of a supplier's накладна.
+A Z-звіт/X-звіт contains phrases like "Z-звіт", "Фіскальний звіт", "Звіт нульовано", "Фіскальний звіт
+дійсний" — if you see any of those (or it's clearly a cash-register receipt with sales totals, not a
+supplier invoice with line items and prices), set documentType to "zreport" and leave items empty.
+
 Return ONLY a valid JSON object, no markdown, no explanation.
 Format: {
+  "documentType": "invoice" | "zreport" | "other",
   "supplier": "supplier/vendor name as printed on the invoice letterhead (see supplier-identification rules below), or empty string if not visible",
   "date": "invoice date in YYYY-MM-DD format, or empty string if not visible",
   "invoiceTotal": number (the printed grand total of the invoice, "Всього"/"Разом"/"Сума", without VAT if that's what's printed; 0 if not visible),
@@ -202,6 +210,13 @@ async function recognizeInvoiceImage(imageBase64, mimeType) {
     throw err;
   }
 
+  // A waiter sometimes photographs the cash register's Z-звіт instead of a supplier's накладна —
+  // routes/telegram.js checks this BEFORE trying to create an invoice from it, so it can divert to
+  // the Z-report flow even when the scheduled 22:30 reminder never set the pendingZReport flag.
+  if (!Array.isArray(parsedData) && parsedData.documentType === 'zreport') {
+    return { documentType: 'zreport', items: [], count: 0, supplier: '', date: '', warning: null };
+  }
+
   // Backward-compatible: accept either {supplier,date,invoiceTotal,items} or a bare array
   const parsedItems = Array.isArray(parsedData) ? parsedData : parsedData.items;
   const aiSupplier = Array.isArray(parsedData) ? '' : (parsedData.supplier || '').trim();
@@ -245,7 +260,7 @@ async function recognizeInvoiceImage(imageBase64, mimeType) {
     if (matched) supplier = matched.name;
   }
 
-  return { items: mapped, count: mapped.length, supplier, date: aiDate, warning };
+  return { documentType: 'invoice', items: mapped, count: mapped.length, supplier, date: aiDate, warning };
 }
 
 // Free-text stock receipt report ("Круасан 8 шт, Булочки 50шт") — a waiter typing what just got

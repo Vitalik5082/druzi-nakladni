@@ -520,6 +520,13 @@ router.post('/telegram/webhook', async (req, res) => {
     await reply(chatId, '📷 Отримав, розпізнаю накладну...');
     const result = await recognizeInvoiceImage(base64, 'image/jpeg');
 
+    // Catches a Z-звіт even when the scheduled 22:30 reminder never fired (so pendingZReport was
+    // never set) — content beats timing. Same handler as the flag-based path.
+    if (result.documentType === 'zreport') {
+      await handleZReportPhoto(chatId, largest.file_id, submittedByLabel, recipients);
+      return res.sendStatus(200);
+    }
+
     const suppliers = await readJSON('suppliers.json', []);
     const matchedSupplier = findSupplier(suppliers, result.supplier);
 
