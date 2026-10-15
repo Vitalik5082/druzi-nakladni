@@ -219,7 +219,9 @@ async function main() {
   fullLines.push('', ...orderLines);
 
   const admins = await getRecipients('admin');
-  const others = (await getRecipients()).filter(r => r.role !== 'admin');
+  // Бухгалтер (accountant) and постачальник (supplier) have no use for "who's ordering today" —
+  // only waiters actually place the orders.
+  const others = await getRecipients('waiter');
 
   for (const r of admins) {
     await sendTelegram(r.chatId, fullLines.join('\n'));
