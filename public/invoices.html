@@ -838,7 +838,7 @@ async function createNewProduct() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name, categoryId, unit, weightIngredient,
-        qty: item.qty, price: item.price, invoiceSupplier: inv.supplier
+        qty: item.qty, price: item.price, sourceUnit: item.unit, invoiceSupplier: inv.supplier
       })
     });
     const data = await res.json();

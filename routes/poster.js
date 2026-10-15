@@ -555,10 +555,22 @@ router.get('/poster/ingredient-categories', async (req, res) => {
   }
 });
 
+// накладна items are stored internally in g/ml (not kg/l) — bitten by this exact mismatch once
+// already this session (250g silently became 250kg): the new Poster ingredient's unit is kg/l, so
+// a накладна item whose OWN unit is the finer-grained g/ml must have its qty divided by 1000 and
+// price multiplied by 1000 before becoming a supply, or the stock comes out 1000x too high.
+function toTargetUnitQtyPrice(sourceUnit, targetUnit, qty, price) {
+  const scalesDown = (sourceUnit === 'g' && targetUnit === 'kg') || (sourceUnit === 'ml' && targetUnit === 'l');
+  if (!scalesDown) return { qty, price };
+  return { qty: qty / 1000, price: price * 1000 };
+}
+
 router.post('/products/create-new', async (req, res) => {
-  const { name, categoryId, unit, weightIngredient, qty, price, invoiceSupplier } = req.body;
+  const { name, categoryId, unit, weightIngredient, qty, price, invoiceSupplier, sourceUnit } = req.body;
   if (!name || !unit) return res.status(400).json({ error: 'name and unit required' });
   if (!['kg', 'l', 'p'].includes(unit)) return res.status(400).json({ error: 'unit must be kg, l or p' });
+
+  const scaled = toTargetUnitQtyPrice(sourceUnit, unit, Number(qty) || 0, Number(price) || 0);
 
   try {
     let ingredientId;
@@ -592,10 +604,10 @@ router.post('/products/create-new', async (req, res) => {
       }
     }
 
-    if (Number(qty) > 0) {
+    if (scaled.qty > 0) {
       await createPosterSupply({
         date: posterDateTimeStr(), supplierId: posterSupplierId,
-        items: [{ ingredientId, qty: Number(qty), sum: Number(price) || 0 }]
+        items: [{ ingredientId, qty: scaled.qty, sum: scaled.price }]
       });
     }
 
@@ -609,7 +621,7 @@ router.post('/products/create-new', async (req, res) => {
     // usable (e.g. invoices.html's product-reassignment unit lookup) without waiting for the next
     // /poster/sync-ingredients run.
     const cache = await readJSON('posterIngredients.json', {});
-    cache[ingredientId] = { left: Number(qty) || 0, name, unit, syncedAt: new Date().toISOString(), ingredient_id: ingredientId };
+    cache[ingredientId] = { left: scaled.qty, name, unit, syncedAt: new Date().toISOString(), ingredient_id: ingredientId };
     await writeJSON('posterIngredients.json', cache);
 
     res.json({ name, unit, ingredientId });
