@@ -10,7 +10,9 @@
   --border2: #3a3e45;
   --text: #e8eaed;
   --text2: #9aa0ab;
-  --text3: #5a6170;
+  --text3: #747c8a; /* was #5a6170 — ~3.2:1 contrast on --bg2, below WCAG AA for small text like
+    .stat-note/.original-name/.page-sub; readable in a dim room but hard to read on a phone
+    screen outdoors/under bar lighting. ~4.6:1 now. */
   --accent: #00d084;
   --accent2: #00a868;
   --warn: #ffb340;
@@ -137,6 +139,21 @@ nav.main-nav {
 a.nav-top.active { background: var(--bg3); color: var(--accent); border-color: var(--border); }
 a.nav-top.disabled { color: var(--text3); cursor: default; opacity: .5; }
 a.nav-top.disabled:hover { background: none; color: var(--text3); }
+
+/* Hidden on desktop — shown only under the mobile breakpoint below, where it toggles .main-nav. */
+.nav-burger {
+  display: none;
+  width: 36px; height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font-size: 16px;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+}
+.nav-burger:hover { background: var(--bg3); }
 
 /* ---- MAIN LAYOUT ---- */
 main {
@@ -629,3 +646,73 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
 .preview-val.green { color: var(--accent); }
 .preview-val.warn { color: var(--warn); }
 .preview-val.info { color: var(--info); }
+
+/* ======================================================================
+   MOBILE (<=680px) — no breakpoints existed anywhere in this app before.
+   Phones are a real usage case here (waiters/admin checking накладні,
+   dashboard, etc. on the go), so this collapses the multi-row header
+   nav into a burger menu, narrows paddings/grids to fit ~375-390px
+   viewports without horizontal page scroll, and grows the smallest
+   interactive targets (checkboxes, .btn.sm, table action buttons)
+   closer to a reliable ~40px tap size.
+   ====================================================================== */
+@media (max-width: 680px) {
+  header { padding: 12px 16px; gap: 10px; }
+  .logo { font-size: 13px; }
+  .status-dot span, .status-dot { font-size: 10px; }
+
+  .nav-burger { display: flex; }
+
+  /* Collapsed by default; .open (toggled by nav.js) expands it as a full-width stacked panel
+     dropped below the header instead of the desktop inline-flex row. */
+  nav.main-nav {
+    display: none;
+    position: absolute;
+    top: 100%; left: 0; right: 0;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border2);
+    box-shadow: 0 10px 30px rgba(0,0,0,.4);
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    padding: 6px;
+    z-index: 60;
+  }
+  nav.main-nav.open { display: flex; }
+  header { position: relative; }
+
+  .nav-top { width: 100%; padding: 11px 13px; }
+  .nav-dropdown { width: 100%; }
+  /* No hover on touch — the panel is just always part of the stacked flow once the group is open,
+     not an absolutely-positioned floating dropdown (which would float relative to the whole page,
+     not the nav item, once main-nav itself goes from inline-flex to a stacked column). */
+  .nav-panel { position: static; padding-top: 0; display: none; min-width: 0; }
+  .nav-dropdown.open .nav-panel { display: flex; }
+  .nav-panel-inner { box-shadow: none; border-color: var(--border); margin: 2px 0 6px 10px; }
+  .nav-panel a { padding: 10px 12px; }
+
+  main, main.wide { padding: 16px; max-width: 100%; }
+  h1.page-title { font-size: 16px; }
+  .page-sub { margin-bottom: 20px; }
+
+  .stats-row { grid-template-columns: repeat(2, 1fr); }
+  .stat-card { padding: 10px 12px; }
+  .stat-value { font-size: 15px; }
+
+  .form-card { padding: 14px; }
+  .form-grid { grid-template-columns: 1fr; }
+
+  .modal { padding: 16px; width: 100%; }
+
+  /* Touch targets. .btn.sm is used densely in table rows (накладна edit row, product-suppliers) —
+     the old 4px/10px padding at 11px font is well under the ~40px minimum comfortable tap size. */
+  .btn { padding: 9px 14px; }
+  .btn.sm { padding: 8px 12px; font-size: 12px; }
+  input[type="checkbox"] { width: 20px; height: 20px; }
+
+  .toast { left: 16px; right: 16px; bottom: 16px; }
+}
+
+@media (max-width: 420px) {
+  .stats-row { grid-template-columns: 1fr; }
+}

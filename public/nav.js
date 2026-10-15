@@ -72,6 +72,7 @@ function renderNav(active) {
   root.innerHTML = `
     <header>
       <div class="logo">invoice<span>.ai</span></div>
+      <button class="nav-burger" onclick="toggleMobileNav(event)" aria-label="Меню">☰</button>
       <nav class="main-nav">${groups}</nav>
       <div style="display:flex;align-items:center;gap:14px">
         <div class="status-dot"><div class="dot"></div>Online</div>
@@ -79,6 +80,13 @@ function renderNav(active) {
       </div>
     </header>
   `;
+}
+
+// Burger menu only exists visually under the mobile breakpoint (style.css hides it otherwise) —
+// toggles the whole nav.main-nav open/closed as a stacked panel instead of the desktop inline row.
+function toggleMobileNav(event) {
+  event.stopPropagation();
+  document.querySelector('nav.main-nav')?.classList.toggle('open');
 }
 
 // Dropdowns open on :hover/:focus-within in CSS, which desktop mice get for free — but there's
@@ -94,6 +102,7 @@ function toggleNavDropdown(event, el) {
 
 document.addEventListener('click', () => {
   document.querySelectorAll('.nav-dropdown.open').forEach(d => d.classList.remove('open'));
+  document.querySelector('nav.main-nav.open')?.classList.remove('open');
 });
 
 function logout() {
