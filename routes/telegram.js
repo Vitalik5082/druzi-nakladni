@@ -223,6 +223,16 @@ async function handleZReportPhoto(chatId, fileId, submittedByLabel, recipients) 
   }
 }
 
+// Converts a waiter's stated unit to the matched ingredient's own base unit (kg/l/p in Poster) —
+// г/грам(и)/g → kg, мл/ml → l, divided by 1000. Any count-type word (шт, ящик, пачка, упаковка...)
+// or an already-matching unit passes through unchanged.
+function convertToIngredientUnit(qty, statedUnit, baseUnit) {
+  const u = (statedUnit || '').toLowerCase().trim();
+  if (baseUnit === 'kg' && /^г(рам(а|ів)?)?$|^g$/.test(u)) return qty / 1000;
+  if (baseUnit === 'l' && /^мл$|^ml$/.test(u)) return qty / 1000;
+  return qty;
+}
+
 // Free-text goods-receipt report from a waiter ("Круасан 8 шт, Булочки 50шт") — no fixed format,
 // no photo. AI extracts {name, qty, unit} triples, each matched against the LIVE Poster ingredient
 // catalog (exact normalized match, then fuzzy via Fuse.js). Matching alone has no price — the sum
@@ -260,7 +270,11 @@ async function handleStockText(chatId, text, submittedByLabel) {
     }
     if (idx === -1) { unmatched.push(item); continue; }
     const ing = ingredients[idx];
-    matched.push({ ingredientId: ing.ingredient_id, name: ing.ingredient_name, unit: ing.ingredient_unit, qty: item.qty, rawName: item.name });
+    // A waiter's unit word (г/грам, мл) doesn't always match the ingredient's own base unit
+    // (kg/l) — without converting, "Салямі 250 грам" silently became 250 KG in Poster once
+    // (1000x). Count-type units (шт, ящик, пачка...) pass through unchanged against a 'p' base.
+    const qty = convertToIngredientUnit(item.qty, item.unit, ing.ingredient_unit);
+    matched.push({ ingredientId: ing.ingredient_id, name: ing.ingredient_name, unit: ing.ingredient_unit, qty, rawName: item.name });
   }
 
   if (!matched.length) {

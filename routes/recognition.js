@@ -252,8 +252,14 @@ async function recognizeStockText(text) {
       content: `A waiter at a bar is reporting goods just received, in free-form Ukrainian text, no
 fixed format. Extract every (item name, quantity, unit) triple you can find.
 Examples of input: "Круасан 8 шт, Булочки 50шт" / "Привезли 2 ящики пива і 10кг картоплі" / "булка бріош 50".
-Unit defaults to "шт" (pieces) if not stated. Keep the item name as close to the original Ukrainian wording as
-possible (don't translate or heavily normalize it) — just strip obvious filler words.
+Unit defaults to "шт" (pieces) if not stated. Normalize the unit to exactly one of: "шт", "кг", "г", "л", "мл"
+(convert count-type words like "ящик"/"пачка"/"уп" to "шт" with their multiplier folded into qty if a per-pack
+size is obvious, otherwise leave qty as the stated pack count and unit "шт"). Never leave qty in grams/ml when
+the waiter wrote a decimal kg/l amount, and never leave it in kg/l when they clearly wrote grams/ml — e.g.
+"250 грам" is qty 250, unit "г" (NOT qty 0.25, unit "кг" — do the unit conversion arithmetic yourself only when
+converting words like "ящик" to counts, never silently relabel a gram amount as kilos or vice versa).
+Keep the item name as close to the original Ukrainian wording as possible (don't translate or heavily
+normalize it) — just strip obvious filler words.
 Return ONLY a valid JSON object, no markdown, no explanation.
 Format: { "items": [ { "name": string, "qty": number, "unit": string } ] }
 Message: """${text}"""`
