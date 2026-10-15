@@ -9,6 +9,19 @@
 const express = require('express');
 const { readJSON, writeJSON } = require('../lib/store');
 
+// Vercel's build statically scans for `require("literal string")` to decide which files belong in
+// the serverless bundle — a dynamic `require(someVariable)` isn't analyzable, so scripts/*.js
+// silently never made it into the deployed function. Worked locally (every file is on disk), 200
+// OK'd in production too (per-job errors are caught below, never failing the HTTP response) while
+// actually throwing "Cannot find module" internally every single tick. Literal requires fix that.
+const jobModules = {
+  dailyReport: require('../scripts/daily-report'),
+  supplierStockDigest: require('../scripts/supplier-stock-digest'),
+  zreportReminder: require('../scripts/zreport-reminder'),
+  accountantMonthly: require('../scripts/monthly-accountant-reminder'),
+  monthlyReport: require('../scripts/monthly-report')
+};
+
 const router = express.Router();
 
 function kyivNow() {
@@ -39,11 +52,11 @@ function withinWindow(nowMinutes, targetHM) {
 }
 
 const JOBS = [
-  { key: 'dailyReport', targetHM: '11:00', module: '../scripts/daily-report' },
-  { key: 'supplierStockDigest', targetHM: '18:00', module: '../scripts/supplier-stock-digest' },
-  { key: 'zreportReminder', targetHM: '22:30', module: '../scripts/zreport-reminder' },
-  { key: 'accountantMonthly', targetHM: '10:00', module: '../scripts/monthly-accountant-reminder', onlyOnDay: 15 },
-  { key: 'monthlyReport', targetHM: '11:00', module: '../scripts/monthly-report', onlyOnDay: 1 }
+  { key: 'dailyReport', targetHM: '11:00' },
+  { key: 'supplierStockDigest', targetHM: '18:00' },
+  { key: 'zreportReminder', targetHM: '22:30' },
+  { key: 'accountantMonthly', targetHM: '10:00', onlyOnDay: 15 },
+  { key: 'monthlyReport', targetHM: '11:00', onlyOnDay: 1 }
 ];
 
 router.all('/cron/tick', async (req, res) => {
@@ -67,7 +80,7 @@ router.all('/cron/tick', async (req, res) => {
     if (lastRun[job.key] === now.date) continue; // already ran today
 
     try {
-      await require(job.module).main();
+      await jobModules[job.key].main();
       lastRun[job.key] = now.date;
       results.push({ job: job.key, status: 'ok' });
     } catch (err) {
