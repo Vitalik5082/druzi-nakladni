@@ -158,7 +158,7 @@ Format: {
   "supplier": "supplier/vendor name as printed on the invoice letterhead (see supplier-identification rules below), or empty string if not visible",
   "date": "invoice date in YYYY-MM-DD format, or empty string if not visible",
   "invoiceTotal": number (the printed grand total of the invoice, "Всього"/"Разом"/"Сума", without VAT if that's what's printed; 0 if not visible),
-  "items": [ { "name": "product name", "qty": number, "unit": "kg|g|pcs|l|ml", "price": number } ]
+  "items": [ { "name": "product name", "qty": number, "unit": "kg|g|pcs|l|ml", "price": number, "total": number } ]
 }
 
 Rules for items:
@@ -166,6 +166,7 @@ Rules for items:
 - unit = unit from "Кількість" column: "кг"→"kg", "г"→"g", "шт"→"pcs", "л"→"l", "мл"→"ml", "уп"→"pcs"
 - price = price per unit from "Ціна" column
 - qty = number from "Кількість" column (do NOT multiply by weight)
+- total = the row's own printed "Сума" column — read it directly, do NOT compute it as qty×price (it's used as a sanity check and, for a хімія/пакування invoice, as the authoritative figure instead of qty×price)
 - Do not skip any rows
 
 CRITICAL — for "шт" products WITH weight/volume in the name, keep unit as "pcs" but KEEP the weight in the name:
