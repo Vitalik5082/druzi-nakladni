@@ -196,6 +196,57 @@ async function handlePaymentText(chatId, amount) {
   });
 }
 
+// Shared tail of накладна creation (used both when the supplier was recognized immediately, and
+// after a waiter resolves an unrecognized-supplier prompt) — creates the накладна, replies to the
+// sender, asks payment status, and forwards the photo + AI self-check warning to admin/бухгалтер.
+async function finalizeInvoiceCreation(chatId, supplierName, result, fileId, submittedByLabel, recipients) {
+  const created = await createInvoice({
+    supplier: supplierName,
+    date: result.date,
+    items: result.items,
+    source: 'telegram',
+    submittedBy: submittedByLabel,
+    pendingReview: true
+  });
+
+  if (created.duplicate) {
+    await reply(chatId,
+      `⚠️ Схожа накладна вже є в системі (${created.existing.supplier}, ${created.existing.date}, ` +
+      `${(created.existing.total_with_vat || created.existing.total * 1.2).toFixed(2)} ₴). Не додав повторно.`);
+    return;
+  }
+
+  const inv = created.invoice;
+  const grossTotal = inv.total_with_vat || inv.total * 1.2;
+  await reply(chatId,
+    `✅ Накладну додано на перевірку!\nПостачальник: ${inv.supplier}\nДата: ${inv.date}\n` +
+    `Сума до сплати (з ПДВ): ${grossTotal.toFixed(2)} ₴${result.warning ? '\n\n⚠️ ' + result.warning : ''}`);
+
+  await askPaymentStatus(chatId, inv.id);
+
+  // Every накладна goes to admin AND бухгалтер, always — visible sender + status, regardless of
+  // supplier config (previously gated by telegramInvoicesAllowed, which caused silent misses).
+  // Forward the actual photo (by file_id, no re-download), not just the AI-extracted text — the
+  // бухгалтер needs to see the real document, not a summary, especially to double-check the AI.
+  const toNotify = recipients.filter(r =>
+    String(r.chatId) !== chatId && ['admin', 'accountant'].includes(r.role));
+
+  for (const r of toNotify) {
+    try {
+      await tg('sendPhoto', {
+        chat_id: r.chatId,
+        photo: fileId,
+        caption: `🧾 Нова накладна від ${submittedByLabel} (через бот):\n` +
+          `Постачальник: ${inv.supplier}\nДата: ${inv.date}\nСума до сплати (з ПДВ): ${grossTotal.toFixed(2)} ₴\n` +
+          `Статус: на перевірці.\nПеревірте на сайті в розділі "Накладні".` +
+          // Previously shown only to the waiter who sent the photo (who can't act on it) — admin/
+          // бухгалтер, who actually review накладні, never saw this AI self-check mismatch at all.
+          (result.warning ? `\n\n⚠️ ${result.warning}` : '')
+      });
+    } catch (e) { console.error('Invoice photo forward failed:', e); }
+  }
+}
+
 // Бухгалтер drops a payment receipt photo — match it to outstanding debt by remaining balance
 // (± 1 ₴, same tolerance the invoice-duplicate check uses) and, if the receipt shows a
 // recognizable recipient, narrow further by supplier.
@@ -519,6 +570,32 @@ router.post('/telegram/webhook', async (req, res) => {
     const tgHandle = from.username ? `@${from.username}` : [from.first_name, from.last_name].filter(Boolean).join(' ');
     const submittedByLabel = tgHandle ? `${sender.name} (${tgHandle})` : sender.name;
 
+    // Resolves the "не впізнав постачальника" prompt below — "так" keeps the AI's original guess,
+    // anything else is treated as the corrected supplier name (re-matched against suppliers.json
+    // in case they typed an existing one; otherwise used as-is for a genuinely new supplier). Takes
+    // priority over the payment-text check right below — someone answering this prompt is mid-flow,
+    // not reporting a payment, even if their reply happened to contain a number.
+    if (!message.photo?.length && message.text && message.text.trim()) {
+      const pendingSupplier = await readJSON('pendingSupplierConfirm.json', {});
+      const supplierEntry = pendingSupplier[chatId];
+      if (supplierEntry && (Date.now() - new Date(supplierEntry.timestamp).getTime()) < 6 * 60 * 60 * 1000) {
+        delete pendingSupplier[chatId];
+        await writeJSON('pendingSupplierConfirm.json', pendingSupplier);
+
+        const reply_text = message.text.trim();
+        let resolvedName = supplierEntry.result.supplier;
+        if (!/^(так|да|ок|ok|yes)$/i.test(reply_text)) {
+          const suppliersNow = await readJSON('suppliers.json', []);
+          const rematch = findSupplier(suppliersNow, reply_text);
+          resolvedName = rematch ? rematch.name : reply_text;
+        }
+
+        await finalizeInvoiceCreation(chatId, resolvedName, supplierEntry.result, supplierEntry.fileId, supplierEntry.submittedByLabel, recipients);
+        return res.sendStatus(200);
+      }
+      if (supplierEntry) { delete pendingSupplier[chatId]; await writeJSON('pendingSupplierConfirm.json', pendingSupplier); }
+    }
+
     // "Оплачено: 5000" (or "оплата 5000", "заплатили 5000") — any sender, not just бухгалтер.
     // Checked before the role-specific text branches below: a distinctive enough keyword+amount
     // that it won't collide with handleStockText's "Круасан 8 шт" or a pendingStockAmount bare-
@@ -607,52 +684,23 @@ router.post('/telegram/webhook', async (req, res) => {
     const suppliers = await readJSON('suppliers.json', []);
     const matchedSupplier = findSupplier(suppliers, result.supplier);
 
-    const created = await createInvoice({
-      supplier: matchedSupplier ? matchedSupplier.name : (result.supplier || ''),
-      date: result.date,
-      items: result.items,
-      source: 'telegram',
-      submittedBy: submittedByLabel,
-      pendingReview: true
-    });
-
-    if (created.duplicate) {
+    // Unrecognized supplier name (not just "AI found nothing" — AI DID read something off the
+    // document, it just doesn't match anyone in suppliers.json) used to fall straight into
+    // ensureSupplier() creating a brand-new supplier silently — confirmed live: an OCR misread of
+    // "СервісПако" as "СервісПакЮ" created a duplicate AND skipped that supplier's
+    // isChemistrySupplier flag, running the whole накладна through food-catalog matching again.
+    // Asking the waiter is cheap and catches this at the source instead of guessing.
+    if (!matchedSupplier && result.supplier) {
+      const pendingSupplier = await readJSON('pendingSupplierConfirm.json', {});
+      pendingSupplier[chatId] = { result, fileId: largest.file_id, submittedByLabel, timestamp: new Date().toISOString() };
+      await writeJSON('pendingSupplierConfirm.json', pendingSupplier);
       await reply(chatId,
-        `⚠️ Схожа накладна вже є в системі (${created.existing.supplier}, ${created.existing.date}, ` +
-        `${(created.existing.total_with_vat || created.existing.total * 1.2).toFixed(2)} ₴). Не додав повторно.`);
+        `⚠️ Не впізнав постачальника на фото: "${result.supplier}".\n\n` +
+        `Якщо назва правильна — напишіть "так". Якщо ні — напишіть правильну назву постачальника.`);
       return res.sendStatus(200);
     }
 
-    const inv = created.invoice;
-    const grossTotal = inv.total_with_vat || inv.total * 1.2;
-    await reply(chatId,
-      `✅ Накладну додано на перевірку!\nПостачальник: ${inv.supplier}\nДата: ${inv.date}\n` +
-      `Сума до сплати (з ПДВ): ${grossTotal.toFixed(2)} ₴${result.warning ? '\n\n⚠️ ' + result.warning : ''}`);
-
-    await askPaymentStatus(chatId, inv.id);
-
-    // Every накладна goes to admin AND бухгалтер, always — visible sender + status, regardless of
-    // supplier config (previously gated by telegramInvoicesAllowed, which caused silent misses).
-    // Forward the actual photo (by file_id, no re-download), not just the AI-extracted text — the
-    // бухгалтер needs to see the real document, not a summary, especially to double-check the AI.
-    const toNotify = recipients.filter(r =>
-      String(r.chatId) !== chatId && ['admin', 'accountant'].includes(r.role));
-
-    for (const r of toNotify) {
-      try {
-        await tg('sendPhoto', {
-          chat_id: r.chatId,
-          photo: largest.file_id,
-          caption: `🧾 Нова накладна від ${submittedByLabel} (через бот):\n` +
-            `Постачальник: ${inv.supplier}\nДата: ${inv.date}\nСума до сплати (з ПДВ): ${grossTotal.toFixed(2)} ₴\n` +
-            `Статус: на перевірці.\nПеревірте на сайті в розділі "Накладні".` +
-            // Previously shown only to the waiter who sent the photo (who can't act on it) — admin/
-            // бухгалтер, who actually review накладні, never saw this AI self-check mismatch at all.
-            (result.warning ? `\n\n⚠️ ${result.warning}` : '')
-        });
-      } catch (e) { console.error('Invoice photo forward failed:', e); }
-    }
-
+    await finalizeInvoiceCreation(chatId, matchedSupplier ? matchedSupplier.name : (result.supplier || ''), result, largest.file_id, submittedByLabel, recipients);
     res.sendStatus(200);
   } catch (err) {
     console.error('Telegram webhook error:', err);
