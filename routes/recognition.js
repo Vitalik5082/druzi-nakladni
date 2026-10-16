@@ -200,7 +200,12 @@ async function recognizeInvoiceImage(imageBase64, mimeType) {
 
   const response = await openai.chat.completions.create({
     model: "gpt-4o",
-    max_tokens: 2000,
+    // Was 2000 — a хімія/пакування накладна with 20+ verbose SKU names ("Контейнер з харч. фольги
+    // SP64L (1000 мл) 216×152×43, R-26 (100/1200) (арт. 3204/64) HiTPACK") plus one "total" field
+    // per item was enough to hit this ceiling and get cut off mid-JSON (confirmed live — "invalid
+    // JSON" error — right after the "total" field was added, though a big enough накладна could
+    // likely have hit it even before that). 4000 covers a much larger item count with margin.
+    max_tokens: 4000,
     messages: [
       {
         role: "user",
@@ -219,7 +224,13 @@ async function recognizeInvoiceImage(imageBase64, mimeType) {
   try {
     parsedData = JSON.parse(cleaned);
   } catch (e) {
-    const err = new Error('AI returned invalid JSON');
+    // Distinguishes "GPT-4o actually wrote malformed JSON" from "the response got cut off at
+    // max_tokens" (finish_reason: 'length') — the latter is diagnosable from the error message
+    // alone instead of needing to fetch Vercel logs for err.raw every time it happens again.
+    const truncated = response.choices?.[0]?.finish_reason === 'length';
+    const err = new Error(truncated
+      ? 'AI response truncated (hit max_tokens) — invoice probably has too many items/too-long names'
+      : 'AI returned invalid JSON');
     err.raw = rawText;
     throw err;
   }
