@@ -42,6 +42,7 @@
           <th>Умови</th>
           <th>Автопересилка бухгалтеру</th>
           <th>Ціни з ПДВ</th>
+          <th>Хімія/пакування</th>
           <th></th>
         </tr>
       </thead>
@@ -69,7 +70,7 @@ async function load() {
 function render() {
   const tbody = document.getElementById('tableBody');
   if (!suppliers.length) {
-    tbody.innerHTML = `<tr><td colspan="8"><div class="empty"><div class="empty-title">Немає постачальників</div></div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9"><div class="empty"><div class="empty-title">Немає постачальників</div></div></td></tr>`;
     return;
   }
 
@@ -99,6 +100,12 @@ function render() {
           так
         </label>
       </td>
+      <td style="text-align:center">
+        <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text2)" title="Якщо позначено — позиції цього постачальника НЕ зіставляються з харчовим каталогом і НЕ проходять вагову/об'ємну конвертацію (вони не існують там як інгредієнти) — беруться як є з AI-розпізнавання, автоматично позначаються 'Хімія'">
+          <input type="checkbox" class="chemistry-check" data-id="${s.id}" ${s.isChemistrySupplier ? 'checked' : ''}>
+          так
+        </label>
+      </td>
       <td><button class="btn sm danger" onclick="deleteSupplier(${s.id})">✕</button></td>
     </tr>`;
   }).join('');
@@ -111,7 +118,8 @@ document.getElementById('saveAllBtn').addEventListener('click', async () => {
     contact: tr.querySelector('.contact-input').value.trim(),
     terms: tr.querySelector('.terms-input').value.trim(),
     telegramInvoicesAllowed: tr.querySelector('.telegram-allowed-check').checked,
-    pricesIncludeVat: tr.querySelector('.vat-included-check').checked
+    pricesIncludeVat: tr.querySelector('.vat-included-check').checked,
+    isChemistrySupplier: tr.querySelector('.chemistry-check').checked
   }));
 
   document.getElementById('saveStatus').textContent = 'Збереження...';

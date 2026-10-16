@@ -4,7 +4,7 @@ const Fuse = require('fuse.js');
 const path = require('path');
 const express = require('express');
 const multer = require('multer');
-const { convertItem, normalize, findSupplier } = require('../lib/convert');
+const { convertItem, passthroughChemistryItem, normalize, findSupplier } = require('../lib/convert');
 const { readJSON, writeJSON } = require('../lib/store');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -249,7 +249,16 @@ async function recognizeInvoiceImage(imageBase64, mimeType) {
 
   const unitOverrides = await readJSON('unitOverrides.json', {});
 
+  // A накладна from a хімія/пакування supplier (cleaning supplies, disposables, packaging) never
+  // matches anything real in products.json (the FOOD/drink catalog) — forcing it through
+  // findBestMatch()+convertItem() anyway was exactly what mismatched a trash bag to "Картопля Фрі"
+  // and inflated a real 8336₴ invoice to 21553₴. Skip both for a flagged supplier's накладна.
+  const suppliersList = await readJSON('suppliers.json', []);
+  const matchedSupplier = findSupplier(suppliersList, aiSupplier);
+  const isChemistrySupplier = !!matchedSupplier?.isChemistrySupplier;
+
   const mapped = parsedItems.map((item, idx) => {
+    if (isChemistrySupplier) return { ...passthroughChemistryItem(item, idx), isNewProduct: false };
     const mappedName = findBestMatch(item.name);
     const converted = convertItem(item, mappedName, portionRules, unitOverrides, idx);
     return { ...converted, isNewProduct: isUnrecognizedProduct(item.name, mappedName) };

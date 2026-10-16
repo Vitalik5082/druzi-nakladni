@@ -85,14 +85,16 @@ async function handleCallback(callbackQuery) {
 
   const payMatch = data.match(/^pay:(yes|no):(\d+)$/);
   const receiptMatch = data.match(/^recv:(\d+)$/);
+  const paytextMatch = data.match(/^paytext:(yes|no):(\d+)$/);
 
-  if (!payMatch && !receiptMatch) {
+  if (!payMatch && !receiptMatch && !paytextMatch) {
     await tg('answerCallbackQuery', { callback_query_id: callbackQuery.id });
     return;
   }
 
   const invoices = await readJSON(FILE, []);
-  const invoice = invoices.find(inv => inv.id === Number(payMatch ? payMatch[2] : receiptMatch[1]));
+  const invoiceId = Number(payMatch ? payMatch[2] : (receiptMatch ? receiptMatch[1] : paytextMatch[2]));
+  const invoice = invoices.find(inv => inv.id === invoiceId);
   if (!invoice) {
     await tg('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Накладну не знайдено' });
     return;
@@ -106,6 +108,30 @@ async function handleCallback(callbackQuery) {
       text: `✅ Чек прив'язано до: ${invoice.supplier}, ${invoice.date}, ${grossTotalOf(invoice).toFixed(2)} ₴`
     });
     await notifyStatusChange(invoice, `✅ Оплачено (чек від бухгалтера, ${grossTotalOf(invoice).toFixed(2)} ₴)`, chatId);
+    return;
+  }
+
+  // Waiter-typed "Оплачено: X" confirmation (handlePaymentText) — unlike the receipt-photo and
+  // pay:yes/no flows (which already name a specific SPECIFIC single накладна by context), this one
+  // guessed the накладна purely from a typed amount, so "Ні" must NOT fall back to "borg" the way
+  // pay:no does — the guess might just be the wrong накладна, not a real "not paid yet".
+  if (paytextMatch) {
+    const [, action] = paytextMatch;
+    if (action === 'yes') {
+      await markInvoicePaid(invoice);
+      await tg('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Позначено як оплачено' });
+      await tg('editMessageText', {
+        chat_id: chatId, message_id: messageId,
+        text: `✅ Оплачено: ${invoice.supplier}, ${invoice.date}, ${grossTotalOf(invoice).toFixed(2)} ₴`
+      });
+      await notifyStatusChange(invoice, `✅ Оплачено (текстом від офіціанта, ${grossTotalOf(invoice).toFixed(2)} ₴)`, chatId);
+    } else {
+      await tg('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Скасовано' });
+      await tg('editMessageText', {
+        chat_id: chatId, message_id: messageId,
+        text: `❌ Не та накладна — нічого не змінено. Напишіть точніше або позначте оплату вручну на сайті.`
+      });
+    }
     return;
   }
 
@@ -128,6 +154,48 @@ async function handleCallback(callbackQuery) {
   }
 }
 
+// Matches outstanding (unpaid/partially-paid) накладні by remaining balance, ± tolerance — shared
+// by handleReceiptPhoto (a real receipt's recognized amount) and handlePaymentText (a typed "Оплачено: X").
+function findOutstandingByAmount(invoices, amount, tolerance = 1) {
+  return invoices
+    .map(inv => ({ inv, balance: Number((grossTotalOf(inv) - (inv.paidAmount || 0)).toFixed(2)) }))
+    .filter(x => x.balance > 0.01 && Math.abs(x.balance - amount) < tolerance);
+}
+
+// Payment is usually confirmed by бухгалтер via a receipt photo (handleReceiptPhoto, auto-applied
+// when there's exactly one balance match) — but a WAITER sometimes settles an old накладна in cash
+// and just types "Оплачено: 5000" with no receipt to photograph. Unlike a real receipt, a typed
+// number alone is too weak a signal to auto-apply — always ask for explicit confirmation naming the
+// specific накладна (supplier + date) before marking it paid, so a coincidental amount match (or a
+// typo) can't silently misattribute a payment.
+async function handlePaymentText(chatId, amount) {
+  const invoices = await readJSON(FILE, []);
+  const candidates = findOutstandingByAmount(invoices, amount);
+
+  if (!candidates.length) {
+    await reply(chatId, `⚠️ Не знайшов накладної з боргом ${amount.toFixed(2)} ₴. Перевірте вручну на сайті в розділі "Накладні".`);
+    return;
+  }
+
+  if (candidates.length > 1) {
+    const lines = candidates.map(c => `• ${c.inv.supplier || '—'}, ${c.inv.date} — ${c.balance.toFixed(2)} ₴`).join('\n');
+    await reply(chatId,
+      `Знайшов кілька накладних з боргом ${amount.toFixed(2)} ₴:\n${lines}\n\n` +
+      `Напишіть точніше (постачальника), або позначте оплату вручну на сайті.`);
+    return;
+  }
+
+  const { inv, balance } = candidates[0];
+  await tg('sendMessage', {
+    chat_id: chatId,
+    text: `💳 Ви підтверджуєте оплату накладної по ${inv.supplier || '—'} за ${inv.date} на суму ${balance.toFixed(2)} ₴?`,
+    reply_markup: { inline_keyboard: [[
+      { text: '✅ Так', callback_data: `paytext:yes:${inv.id}` },
+      { text: '❌ Ні', callback_data: `paytext:no:${inv.id}` }
+    ]] }
+  });
+}
+
 // Бухгалтер drops a payment receipt photo — match it to outstanding debt by remaining balance
 // (± 1 ₴, same tolerance the invoice-duplicate check uses) and, if the receipt shows a
 // recognizable recipient, narrow further by supplier.
@@ -142,11 +210,7 @@ async function handleReceiptPhoto(chatId, base64) {
   const invoices = await readJSON(FILE, []);
   const suppliers = await readJSON('suppliers.json', []);
 
-  const outstanding = invoices
-    .map(inv => ({ inv, balance: Number((grossTotalOf(inv) - (inv.paidAmount || 0)).toFixed(2)) }))
-    .filter(x => x.balance > 0.01);
-
-  let candidates = outstanding.filter(x => Math.abs(x.balance - result.amount) < 1);
+  let candidates = findOutstandingByAmount(invoices, result.amount);
 
   if (candidates.length > 1 && result.recipient) {
     const matchedSupplier = findSupplier(suppliers, result.recipient);
@@ -455,6 +519,18 @@ router.post('/telegram/webhook', async (req, res) => {
     const tgHandle = from.username ? `@${from.username}` : [from.first_name, from.last_name].filter(Boolean).join(' ');
     const submittedByLabel = tgHandle ? `${sender.name} (${tgHandle})` : sender.name;
 
+    // "Оплачено: 5000" (or "оплата 5000", "заплатили 5000") — any sender, not just бухгалтер.
+    // Checked before the role-specific text branches below: a distinctive enough keyword+amount
+    // that it won't collide with handleStockText's "Круасан 8 шт" or a pendingStockAmount bare-
+    // number reply, both of which have no "оплат"/"заплат" keyword in them.
+    if (!message.photo?.length && message.text) {
+      const paymentMatch = message.text.trim().match(/(?:оплачен|оплат|заплат)\w*\D*(\d+(?:[.,]\d+)?)/i);
+      if (paymentMatch) {
+        await handlePaymentText(chatId, parseFloat(paymentMatch[1].replace(',', '.')));
+        return res.sendStatus(200);
+      }
+    }
+
     if (!message.photo || !message.photo.length) {
       if (sender.role === 'waiter' && message.text && message.text.trim() && !message.text.startsWith('/')) {
         const pendingStock = await readJSON('pendingStockAmount.json', {});
@@ -569,7 +645,10 @@ router.post('/telegram/webhook', async (req, res) => {
           photo: largest.file_id,
           caption: `🧾 Нова накладна від ${submittedByLabel} (через бот):\n` +
             `Постачальник: ${inv.supplier}\nДата: ${inv.date}\nСума до сплати (з ПДВ): ${grossTotal.toFixed(2)} ₴\n` +
-            `Статус: на перевірці.\nПеревірте на сайті в розділі "Накладні".`
+            `Статус: на перевірці.\nПеревірте на сайті в розділі "Накладні".` +
+            // Previously shown only to the waiter who sent the photo (who can't act on it) — admin/
+            // бухгалтер, who actually review накладні, never saw this AI self-check mismatch at all.
+            (result.warning ? `\n\n⚠️ ${result.warning}` : '')
         });
       } catch (e) { console.error('Invoice photo forward failed:', e); }
     }
