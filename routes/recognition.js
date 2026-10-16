@@ -269,17 +269,33 @@ async function recognizeInvoiceImage(imageBase64, mimeType) {
   const matchedSupplier = findSupplier(suppliersList, aiSupplier);
   const isChemistrySupplier = !!matchedSupplier?.isChemistrySupplier;
 
-  const mapped = parsedItems.map((item, idx) => {
-    if (isChemistrySupplier) return { ...passthroughChemistryItem(item, idx), isNewProduct: false };
-    const mappedName = findBestMatch(item.name);
-    const converted = convertItem(item, mappedName, portionRules, unitOverrides, idx);
-    return { ...converted, isNewProduct: isUnrecognizedProduct(item.name, mappedName) };
-  });
+  let mapped, warning = null;
+  if (isChemistrySupplier) {
+    // Even with per-item "total" read straight off the invoice (previous fix), the sum still
+    // didn't reconcile in practice — per the user, хімія/пакування doesn't need positions tracked
+    // at all, only the debt/payment total. One lump-sum line using the invoice's own printed grand
+    // total sidesteps per-row AI misreads entirely; item names are kept only as a readable note on
+    // that one line, not as separate costed positions.
+    const names = parsedItems.map(i => i.name).filter(Boolean).join('; ');
+    const itemsRawSum = parsedItems.reduce((s, i) => s + (Number(i.total) || (Number(i.qty) || 0) * (Number(i.price) || 0)), 0);
+    const lumpTotal = Number((aiInvoiceTotal > 0 ? aiInvoiceTotal : itemsRawSum).toFixed(2));
+    const lumpItem = passthroughChemistryItem({
+      name: `Хімія/пакування (${parsedItems.length} поз., без деталізації)`,
+      qty: 1, unit: 'pcs', price: lumpTotal, total: lumpTotal
+    }, 0);
+    lumpItem.original_name = names.length > 500 ? names.slice(0, 500) + '…' : names;
+    mapped = [{ ...lumpItem, isNewProduct: false }];
+  } else {
+    mapped = parsedItems.map((item, idx) => {
+      const mappedName = findBestMatch(item.name);
+      const converted = convertItem(item, mappedName, portionRules, unitOverrides, idx);
+      return { ...converted, isNewProduct: isUnrecognizedProduct(item.name, mappedName) };
+    });
 
-  const itemsSum = mapped.filter(i => !i.skipped).reduce((s, i) => s + (i.total || 0), 0);
-  let warning = null;
-  if (aiInvoiceTotal > 0 && Math.abs(itemsSum - aiInvoiceTotal) > 1) {
-    warning = `Сума розпізнаних позицій (${itemsSum.toFixed(2)} ₴) не збігається з сумою накладної (${aiInvoiceTotal.toFixed(2)} ₴) — перевір вручну, AI міг пропустити рядок або помилитись.`;
+    const itemsSum = mapped.filter(i => !i.skipped).reduce((s, i) => s + (i.total || 0), 0);
+    if (aiInvoiceTotal > 0 && Math.abs(itemsSum - aiInvoiceTotal) > 1) {
+      warning = `Сума розпізнаних позицій (${itemsSum.toFixed(2)} ₴) не збігається з сумою накладної (${aiInvoiceTotal.toFixed(2)} ₴) — перевір вручну, AI міг пропустити рядок або помилитись.`;
+    }
   }
 
   let supplier = aiSupplier || (await suggestSupplier(mapped)) || '';
