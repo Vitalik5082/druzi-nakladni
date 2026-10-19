@@ -353,6 +353,17 @@ router.post('/poster/sync-finance', async (req, res) => {
     const response = await posterCall('finance.getTransactions', { dateFrom: ymd(from), dateTo: ymd(to) });
     const finance = await readJSON('posterFinance.json', {});
 
+    // Expenses created from our own "Витрати" page (routes/expenses.js' createExpenseRecord) are
+    // pushed to Poster as a finance transaction AND kept in expenses.json, so the dashboard already
+    // counts them via otherExpensesManual. Without this exclusion, syncing this same category_id
+    // back from Poster would add the identical amount a second time as otherExpensesFromPoster —
+    // categories 7/8/9/12/13 are shared between CATEGORY_TO_POSTER (expenses.js) and
+    // FINANCE_EXPENSE_CATEGORIES below, so this isn't a hypothetical edge case.
+    const ourExpenses = await readJSON('expenses.json', []);
+    const ownTransactionIds = new Set(
+      ourExpenses.filter(e => e.postedToPoster && e.posterTransactionId).map(e => String(e.posterTransactionId))
+    );
+
     // clear any existing entries inside this range before re-writing, so re-sync doesn't duplicate
     for (const date of Object.keys(finance)) {
       if (date >= from && date <= to) delete finance[date];
@@ -362,6 +373,7 @@ router.post('/poster/sync-finance', async (req, res) => {
       const date = t.date.slice(0, 10);
       const catId = Number(t.category_id);
       if (!FINANCE_EXPENSE_CATEGORIES.includes(catId)) continue;
+      if (ownTransactionIds.has(String(t.transaction_id))) continue;
 
       if (!finance[date]) finance[date] = [];
       finance[date].push({

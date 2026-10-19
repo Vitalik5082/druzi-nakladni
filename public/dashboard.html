@@ -26,6 +26,7 @@
           <option value="today">Сьогодні</option>
           <option value="week">Цей тиждень</option>
           <option value="month" selected>Цей місяць</option>
+          <option value="lastMonth">Попередній місяць</option>
           <option value="custom">Довільний</option>
         </select>
       </div>
@@ -166,6 +167,11 @@ function applyPreset(preset) {
     const first = new Date(today.getFullYear(), today.getMonth(), 1);
     from = fmtD(first);
     to = fmtD(today);
+  } else if (preset === 'lastMonth') {
+    const first = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+    const last = new Date(today.getFullYear(), today.getMonth(), 0);
+    from = fmtD(first);
+    to = fmtD(last);
   } else {
     return;
   }
