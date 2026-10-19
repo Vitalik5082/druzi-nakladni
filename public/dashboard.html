@@ -133,17 +133,20 @@ async function toggleExpensesList() {
     // Chemistry/non-product lines on a накладна count toward "Інші витрати" (dashboard.js'
     // chemistryCost) but live in invoices.json, not expenses.json — merge them in here too so
     // this list actually matches the total shown above it instead of only the manual half of it.
+    // One row per invoice (summed), not per item — an СервісПако(Хімія) накладна alone can have
+    // 20+ lines, which buried the manual expenses in the same list.
     const chemistryRows = [];
     for (const inv of invoices) {
-      for (const item of inv.items || []) {
-        if (item.skipped || !item.isChemistry) continue;
-        chemistryRows.push({
-          date: inv.date,
-          category: 'Хімія (накладна)',
-          description: `${inv.supplier || '—'}: ${item.name || item.original_name || '—'}`,
-          amount: item.total || 0
-        });
-      }
+      const sum = (inv.items || [])
+        .filter(item => !item.skipped && item.isChemistry)
+        .reduce((s, item) => s + (item.total || 0), 0);
+      if (!sum) continue;
+      chemistryRows.push({
+        date: inv.date,
+        category: 'Хімія (накладна)',
+        description: inv.supplier || '—',
+        amount: sum
+      });
     }
 
     const list = [...expensesList, ...chemistryRows];
