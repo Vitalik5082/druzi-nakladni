@@ -516,12 +516,8 @@ router.get('/poster/order-recommendations', async (req, res) => {
       .map(id => suppliers.find(s => s.id === Number(id)))
       .filter(Boolean);
 
-    // Suppliers sell whole packs (ящик/пачка/відро), not "2.37 kg" — when packSize is configured
-    // (сторінка "Постачальники товарів"), round the raw recommendation UP to whole packs so the
-    // number that reaches a supplier is actually orderable.
     const packSize = assignment && assignment.packSize;
     const packUnit = assignment && assignment.packUnit;
-    const packsNeeded = packSize ? Math.ceil(recommendedQty / packSize) : null;
 
     const base = {
       ingredient_id: ing.ingredient_id,
@@ -531,20 +527,35 @@ router.get('/poster/order-recommendations', async (req, res) => {
       reliable,
       avgWeekly: Number(avgWeekly.toFixed(3)),
       recommendedQty: Number(recommendedQty.toFixed(3)),
-      packSize: packSize || null,
-      packUnit: packUnit || null,
-      packsNeeded,
       note: assignment ? assignment.note : ''
     };
+
+    // Suppliers sell whole packs (ящик/пачка/відро), not "2.37 kg" — when packSize is configured
+    // (сторінка "Постачальники товарів"), round the raw recommendation UP to whole packs so the
+    // number that reaches a supplier is actually orderable — EXCEPT Фортуна, who sells loose
+    // produce by whatever fractional weight is on the scale (0.6кг of щось is a normal order for
+    // them), so rounding their line to a pack size would recommend buying more than is needed.
+    // Must happen per-supplier (not once per ingredient) since the same ingredient can be assigned
+    // to both a packaged supplier and Фортуна at once.
+    function withPackInfo(entry, supplierName) {
+      const isFortuna = (supplierName || '').toLowerCase().includes('фортуна');
+      const applyRounding = packSize && !isFortuna;
+      return {
+        ...entry,
+        packSize: applyRounding ? packSize : null,
+        packUnit: applyRounding ? packUnit : null,
+        packsNeeded: applyRounding ? Math.ceil(recommendedQty / packSize) : null
+      };
+    }
 
     // A товар assigned to several suppliers (multi-assignment, to be refined later) shows up
     // under each of them, so whichever supplier's order list you're preparing, it's there.
     if (assignedSuppliers.length) {
       for (const s of assignedSuppliers) {
-        items.push({ ...base, supplierId: s.id, supplierName: s.name });
+        items.push(withPackInfo({ ...base, supplierId: s.id, supplierName: s.name }, s.name));
       }
     } else {
-      items.push({ ...base, supplierId: null, supplierName: null });
+      items.push(withPackInfo({ ...base, supplierId: null, supplierName: null }, null));
     }
   }
 

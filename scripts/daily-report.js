@@ -82,6 +82,7 @@ async function getSupplierDebt() {
 async function computeOrderRecommendations() {
   const ingredientsRef = await readJSON('posterIngredients.json', {});
   const productSuppliers = await readJSON('productSuppliers.json', {});
+  const suppliersRef = await readJSON('suppliers.json', []);
   const sales = await readJSON('posterSales.json', {});
   const techcards = await readJSON('techcards.json', {});
 
@@ -128,11 +129,20 @@ async function computeOrderRecommendations() {
     const assignment = productSuppliers[ing.ingredient_id];
     const packSize = assignment && assignment.packSize;
     const packUnit = assignment && assignment.packUnit;
+    const supplierIds = (assignment && assignment.supplierIds) || [];
+    // Фортуна sells loose produce by whatever fractional weight is on the scale — rounding their
+    // line to a pack size would recommend buying more than needed. Kept in sync with the same
+    // exclusion in routes/poster.js's /poster/order-recommendations.
+    const isFortuna = supplierIds.some(id => {
+      const s = suppliersRef.find(x => x.id === Number(id));
+      return s && s.name.toLowerCase().includes('фортуна');
+    });
+    const applyRounding = packSize && !isFortuna;
     items.push({
       name: ing.name, unit: ing.unit, recommendedQty,
-      packSize: packSize || null, packUnit: packUnit || null,
-      packsNeeded: packSize ? Math.ceil(recommendedQty / packSize) : null,
-      supplierIds: (assignment && assignment.supplierIds) || []
+      packSize: applyRounding ? packSize : null, packUnit: applyRounding ? packUnit : null,
+      packsNeeded: applyRounding ? Math.ceil(recommendedQty / packSize) : null,
+      supplierIds
     });
   }
   items.sort((a, b) => b.recommendedQty - a.recommendedQty);
@@ -141,6 +151,25 @@ async function computeOrderRecommendations() {
 
 async function getTopOrderRecommendations(limit) {
   return (await computeOrderRecommendations()).slice(0, limit);
+}
+
+// Per-ingredient absolute reorder threshold (productSuppliers.json's lowStockThreshold, set on the
+// "Постачальники товарів" page) — unlike computeOrderRecommendations' relative avg-consumption
+// estimate above, this is a fixed "at X left, order now" number. scripts/supplier-stock-digest.js
+// already sends this to the SUPPLIER side; this is the admin-facing half that was missing.
+async function getLowStockAlerts() {
+  const ingredientsRef = await readJSON('posterIngredients.json', {});
+  const productSuppliers = await readJSON('productSuppliers.json', {});
+
+  const alerts = [];
+  for (const ing of Object.values(ingredientsRef)) {
+    const assignment = productSuppliers[ing.ingredient_id];
+    const threshold = assignment && assignment.lowStockThreshold;
+    if (!threshold) continue;
+    const leftover = Number(ing.left) || 0;
+    if (leftover <= threshold) alerts.push({ name: ing.name, leftover, unit: ing.unit, threshold });
+  }
+  return alerts;
 }
 
 async function getSuppliersOrderingToday() {
@@ -214,6 +243,16 @@ async function main() {
     fullLines.push(`📄 Борг постачальникам: <b>${debt.toFixed(2)} ₴</b>`);
   } catch (err) {
     fullLines.push(`📄 Борг: помилка (${err.message})`);
+  }
+
+  try {
+    const lowStock = await getLowStockAlerts();
+    if (lowStock.length) {
+      fullLines.push('', '🔴 <b>Критичний залишок — час замовляти:</b>');
+      lowStock.forEach(a => fullLines.push(`• ${a.name}: залишок ${a.leftover} ${a.unit} (порог ${a.threshold})`));
+    }
+  } catch (err) {
+    fullLines.push(`🔴 Критичний залишок: помилка (${err.message})`);
   }
 
   fullLines.push('', ...orderLines);
