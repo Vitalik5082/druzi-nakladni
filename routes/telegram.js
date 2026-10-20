@@ -332,6 +332,11 @@ function convertToIngredientUnit(qty, statedUnit, baseUnit) {
   return qty;
 }
 
+// Poster's own ingredient_unit is a bare code ('p'/'kg'/'l') — fine for internal qty math, but
+// showing it raw to a waiter/admin in a Telegram message ("Булочка 50 p") is confusing. Display-only.
+const UNIT_DISPLAY = { p: 'шт', kg: 'кг', l: 'л' };
+function unitLabel(u) { return UNIT_DISPLAY[u] || u; }
+
 // Free-text goods-receipt report from a waiter ("Круасан 8 шт, Булочки 50шт") — no fixed format,
 // no photo. AI extracts {name, qty, unit} triples, each matched against the LIVE Poster ingredient
 // catalog (exact normalized match, then fuzzy via Fuse.js). Matching alone has no price — the sum
@@ -399,7 +404,7 @@ async function handleStockText(chatId, text, submittedByLabel) {
   await writeJSON('pendingStockAmount.json', pending);
 
   const lines = ['Розпізнав:'];
-  matched.forEach(i => lines.push(`• ${i.name}: ${i.qty} ${i.unit}`));
+  matched.forEach(i => lines.push(`• ${i.name}: ${i.qty} ${unitLabel(i.unit)}`));
   if (unmatched.length) {
     lines.push('', '❓ Не впізнав (не увійде в накладну):');
     unmatched.forEach(i => lines.push(`• ${i.name} ${i.qty} ${i.unit}`));
@@ -471,7 +476,7 @@ async function handleStockAmountReply(chatId, text, pendingEntry, recipients) {
 
   const grossTotal = inv.total_with_vat || inv.total * 1.2;
   const lines = [`✅ Прихід записано як накладна на ${grossTotal.toFixed(2)} ₴ (очікує підтвердження в реєстрі накладних):`];
-  items.forEach(i => lines.push(`• ${i.name}: ${i.qty} ${i.unit}`));
+  items.forEach(i => lines.push(`• ${i.name}: ${i.qty} ${unitLabel(i.unit)}`));
   await reply(chatId, lines.join('\n'));
 
   await askPaymentStatus(chatId, inv.id);
@@ -479,7 +484,7 @@ async function handleStockAmountReply(chatId, text, pendingEntry, recipients) {
   const toNotify = recipients.filter(r => ['admin', 'accountant'].includes(r.role) && String(r.chatId) !== chatId);
   for (const r of toNotify) {
     await reply(r.chatId,
-      `📦 Прихід текстом від ${submittedBy} (${grossTotal.toFixed(2)} ₴):\n${items.map(i => `${i.name}: ${i.qty} ${i.unit}`).join('\n')}`);
+      `📦 Прихід текстом від ${submittedBy} (${grossTotal.toFixed(2)} ₴):\n${items.map(i => `${i.name}: ${i.qty} ${unitLabel(i.unit)}`).join('\n')}`);
   }
   return true;
 }

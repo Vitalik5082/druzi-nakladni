@@ -31,6 +31,7 @@
 <div id="header-root"></div>
 <script src="auth.js"></script>
 <script src="nav.js"></script>
+<script src="dateutil.js"></script>
 <script>renderNav('invoices'); requireAuth();</script>
 
 <main class="wide">
@@ -114,7 +115,7 @@
 <!-- MATCH MODAL -->
 <div class="modal-overlay" id="matchModal">
   <div class="modal">
-    <div class="modal-title">Змінити відповідність</div>
+    <div class="modal-title" id="matchModalTitle">Змінити відповідність</div>
     <div class="modal-sub" id="modalSub">Оберіть продукт зі списку</div>
     <input class="modal-search" id="modalSearch" placeholder="Пошук продукту..." oninput="filterProducts()">
     <div class="modal-list" id="modalList"></div>
@@ -210,6 +211,9 @@ let payModalId = null;
 const openFolders = new Set();
 const openInvoices = new Set();
 const editingInvoices = new Set();
+// Накладні already auto-prompted for an unmatched "новий товар" this session — without this, every
+// unrelated render() while the row stays open (any edit/save elsewhere) would pop the modal again.
+const autoPromptedInvoices = new Set();
 
 let allProducts = [];
 async function loadProducts() {
@@ -420,9 +424,28 @@ function toggleFolder(supplier) {
 }
 
 function toggleInvoice(id) {
-  if (openInvoices.has(id)) openInvoices.delete(id);
-  else openInvoices.add(id);
-  render();
+  if (openInvoices.has(id)) {
+    openInvoices.delete(id);
+    render();
+  } else {
+    openInvoices.add(id);
+    render();
+    maybeAutoPromptNewProduct(id);
+  }
+}
+
+// Surfaces the rename-or-create-new decision immediately on open instead of relying on the admin
+// to notice the red "новий товар" badge and click ✎ themselves — one prompt per invoice per
+// session (see autoPromptedInvoices); the badge+button stay as the manual fallback either way,
+// including for any further new-product items in the same накладна after this one is resolved.
+function maybeAutoPromptNewProduct(invId) {
+  if (autoPromptedInvoices.has(invId)) return;
+  const inv = invoices.find(i => i.id === invId);
+  if (!inv) return;
+  const newItem = inv.items.find(i => i.isNewProduct && !i.skipped);
+  if (!newItem) return;
+  autoPromptedInvoices.add(invId);
+  openMatchModal(invId, newItem.id);
 }
 
 function openPayModal(id) {
@@ -431,8 +454,12 @@ function openPayModal(id) {
   payModalId = id;
   document.getElementById('payModalSub').textContent =
     `${escHtml(inv.supplier || '—')} від ${inv.date} — сума до сплати (з ПДВ) ${grossOf(inv).toFixed(2)} ₴`;
-  document.getElementById('payAmount').value = inv.paidAmount || 0;
-  document.getElementById('payDate').value = inv.paidDate || '';
+  // Unpaid накладна (paidAmount falsy) — pre-fill with today's date and the full amount actually
+  // owed (з ПДВ), since opening this modal almost always means "pay it off now"; a partially/fully
+  // recorded payment keeps showing what's already on file instead, so re-opening never clobbers it.
+  const alreadyPaid = inv.paidAmount || 0;
+  document.getElementById('payAmount').value = alreadyPaid || grossOf(inv).toFixed(2);
+  document.getElementById('payDate').value = inv.paidDate || todayStr();
   document.getElementById('payDue').value = inv.dueDate || '';
   document.getElementById('payModal').classList.add('open');
 }
@@ -785,7 +812,12 @@ function openMatchModal(invId, itemId) {
   const inv = invoices.find(i => i.id === invId);
   const item = inv && inv.items.find(i => i.id === itemId);
   if (!item) return;
-  document.getElementById('modalSub').textContent = `"${item.original_name || item.name}" → зараз: "${item.name}"`;
+  document.getElementById('matchModalTitle').textContent = item.isNewProduct
+    ? 'Цього товару немає в довіднику Poster'
+    : 'Змінити відповідність';
+  document.getElementById('modalSub').textContent = item.isNewProduct
+    ? `"${item.original_name || item.name}" — перейменуйте на існуючий товар нижче, або підтвердіть додавання новим`
+    : `"${item.original_name || item.name}" → зараз: "${item.name}"`;
   document.getElementById('modalSearch').value = '';
   filterProducts();
   document.getElementById('matchModal').classList.add('open');
