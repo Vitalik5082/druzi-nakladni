@@ -200,27 +200,39 @@ async function handlePaymentText(chatId, amount) {
 // after a waiter resolves an unrecognized-supplier prompt) — creates the накладна, replies to the
 // sender, asks payment status, and forwards the photo + AI self-check warning to admin/бухгалтер.
 async function finalizeInvoiceCreation(chatId, supplierName, result, fileId, submittedByLabel, recipients) {
-  const created = await createInvoice({
-    supplier: supplierName,
-    date: result.date,
-    items: result.items,
-    source: 'telegram',
-    submittedBy: submittedByLabel,
-    pendingReview: true
+  const outcome = await appendOrCreateDailyInvoice({
+    supplierName, date: result.date, items: result.items, source: 'telegram', submittedBy: submittedByLabel
   });
 
-  if (created.duplicate) {
+  if (!outcome.appended && outcome.created.duplicate) {
     await reply(chatId,
-      `⚠️ Схожа накладна вже є в системі (${created.existing.supplier}, ${created.existing.date}, ` +
-      `${(created.existing.total_with_vat || created.existing.total * 1.2).toFixed(2)} ₴). Не додав повторно.`);
+      `⚠️ Схожа накладна вже є в системі (${outcome.created.existing.supplier}, ${outcome.created.existing.date}, ` +
+      `${(outcome.created.existing.total_with_vat || outcome.created.existing.total * 1.2).toFixed(2)} ₴). Не додав повторно.`);
     return;
   }
 
-  const inv = created.invoice;
+  const inv = outcome.appended ? outcome.invoice : outcome.created.invoice;
   const grossTotal = inv.total_with_vat || inv.total * 1.2;
-  await reply(chatId,
-    `✅ Накладну додано на перевірку!\nПостачальник: ${inv.supplier}\nДата: ${inv.date}\n` +
-    `Сума до сплати (з ПДВ): ${grossTotal.toFixed(2)} ₴${result.warning ? '\n\n⚠️ ' + result.warning : ''}`);
+
+  // Unrecognized items aren't resolved here in chat (that needs a full product search, which this
+  // bot's text interface can't offer well) — flag them to the sender so it's not a silent gap, and
+  // point at the website's own popup (invoices.html auto-prompts "перейменувати/додати новим" the
+  // moment this накладна is opened there).
+  const newItems = result.items.filter(i => i.isNewProduct && !i.skipped);
+  const newItemsNote = newItems.length
+    ? `\n\n❓ ${newItems.length === 1 ? 'Позиція' : 'Позиції'} не знайдена в довіднику Poster: ${newItems.map(i => i.name).join(', ')}. ` +
+      `Адмін перейменує або підтвердить додавання на сайті.`
+    : '';
+
+  if (outcome.appended) {
+    await reply(chatId,
+      `✅ Додано до накладної Фортуни за ${inv.date} (тепер ${inv.items.filter(i => !i.skipped).length} позицій)!\n` +
+      `Сума до сплати (з ПДВ): ${grossTotal.toFixed(2)} ₴${newItemsNote}`);
+  } else {
+    await reply(chatId,
+      `✅ Накладну додано на перевірку!\nПостачальник: ${inv.supplier}\nДата: ${inv.date}\n` +
+      `Сума до сплати (з ПДВ): ${grossTotal.toFixed(2)} ₴${result.warning ? '\n\n⚠️ ' + result.warning : ''}${newItemsNote}`);
+  }
 
   await askPaymentStatus(chatId, inv.id);
 
@@ -236,12 +248,14 @@ async function finalizeInvoiceCreation(chatId, supplierName, result, fileId, sub
       await tg('sendPhoto', {
         chat_id: r.chatId,
         photo: fileId,
-        caption: `🧾 Нова накладна від ${submittedByLabel} (через бот):\n` +
+        caption: (outcome.appended
+          ? `🧾 Чек Фортуни від ${submittedByLabel} додано до накладної за ${inv.date}:\n`
+          : `🧾 Нова накладна від ${submittedByLabel} (через бот):\n`) +
           `Постачальник: ${inv.supplier}\nДата: ${inv.date}\nСума до сплати (з ПДВ): ${grossTotal.toFixed(2)} ₴\n` +
           `Статус: на перевірці.\nПеревірте на сайті в розділі "Накладні".` +
           // Previously shown only to the waiter who sent the photo (who can't act on it) — admin/
           // бухгалтер, who actually review накладні, never saw this AI self-check mismatch at all.
-          (result.warning ? `\n\n⚠️ ${result.warning}` : '')
+          (result.warning ? `\n\n⚠️ ${result.warning}` : '') + newItemsNote
       });
     } catch (e) { console.error('Invoice photo forward failed:', e); }
   }
@@ -336,6 +350,37 @@ function convertToIngredientUnit(qty, statedUnit, baseUnit) {
 // showing it raw to a waiter/admin in a Telegram message ("Булочка 50 p") is confusing. Display-only.
 const UNIT_DISPLAY = { p: 'шт', kg: 'кг', l: 'л' };
 function unitLabel(u) { return UNIT_DISPLAY[u] || u; }
+
+// Фортуна has no formal накладна — each delivery is reported piecemeal through the bot over the
+// day (a чек photo, or a few items typed in text), unlike every other supplier whose накладна photo
+// is one complete document. Without this, every separate report became its own invoice (10 items
+// reported one at a time in a day = 10 накладні) instead of one накладна per day listing them all.
+function isFortunaSupplier(name) { return (name || '').toLowerCase().includes('фортуна'); }
+
+// Shared by finalizeInvoiceCreation (photo чек) and handleStockAmountReply (text прихід) — once the
+// supplier is known to be Фортуна, append newItems to today's still-pendingReview Фортуна накладна
+// instead of creating a new one; any other supplier keeps the old one-document-per-submission
+// behaviour untouched.
+async function appendOrCreateDailyInvoice({ supplierName, date, items, source, submittedBy }) {
+  if (!isFortunaSupplier(supplierName)) {
+    return { appended: false, created: await createInvoice({ supplier: supplierName, date, items, source, submittedBy, pendingReview: true }) };
+  }
+
+  const invoices = await readJSON(FILE, []);
+  const existing = invoices.find(inv =>
+    inv.date === date && isFortunaSupplier(inv.supplier) && inv.pendingReview === true);
+
+  if (!existing) {
+    return { appended: false, created: await createInvoice({ supplier: supplierName, date, items, source, submittedBy, pendingReview: true }) };
+  }
+
+  // Fresh ids continuing past whatever's already on the invoice — the website's edit/match-modal
+  // UI keys each row by item.id, so a collision with an existing item would corrupt that row.
+  const maxId = existing.items.reduce((m, i) => Math.max(m, Number(i.id) || 0), -1);
+  const newItems = items.map((item, idx) => ({ ...item, id: maxId + 1 + idx }));
+  const updated = await updateInvoice(existing.id, { items: [...existing.items, ...newItems] });
+  return { appended: true, invoice: updated, addedItems: newItems };
+}
 
 // Free-text goods-receipt report from a waiter ("Круасан 8 шт, Булочки 50шт") — no fixed format,
 // no photo. AI extracts {name, qty, unit} triples, each matched against the LIVE Poster ingredient
@@ -443,22 +488,18 @@ async function handleStockAmountReply(chatId, text, pendingEntry, recipients) {
   const sameSupplierEverywhere = firstSet.length === 1 && supplierIdSets.every(s => s.length === 1 && s[0] === firstSet[0]);
   const supplierRecord = sameSupplierEverywhere ? suppliers.find(s => s.id === firstSet[0]) : null;
 
-  const created = await createInvoice({
-    supplier: supplierRecord ? supplierRecord.name : '',
-    date: localDateStr(),
-    items: invoiceItems,
-    source: 'telegram-text',
-    submittedBy,
-    pendingReview: true
+  const outcome = await appendOrCreateDailyInvoice({
+    supplierName: supplierRecord ? supplierRecord.name : '',
+    date: localDateStr(), items: invoiceItems, source: 'telegram-text', submittedBy
   });
 
-  if (created.duplicate) {
+  if (!outcome.appended && outcome.created.duplicate) {
     await reply(chatId,
-      `⚠️ Схожа накладна вже є в системі (${created.existing.supplier}, ${created.existing.date}, ` +
-      `${(created.existing.total_with_vat || created.existing.total * 1.2).toFixed(2)} ₴). Не додав повторно.`);
+      `⚠️ Схожа накладна вже є в системі (${outcome.created.existing.supplier}, ${outcome.created.existing.date}, ` +
+      `${(outcome.created.existing.total_with_vat || outcome.created.existing.total * 1.2).toFixed(2)} ₴). Не додав повторно.`);
     return true;
   }
-  const inv = created.invoice;
+  const inv = outcome.appended ? outcome.invoice : outcome.created.invoice;
 
   // No Poster push here — this накладна is pendingReview:true, same as any OCR'd накладна from a
   // photo. It only reaches Poster once an admin reviews and confirms it from the реєстр накладних
@@ -475,7 +516,9 @@ async function handleStockAmountReply(chatId, text, pendingEntry, recipients) {
   await writeJSON('textSupplies.json', log);
 
   const grossTotal = inv.total_with_vat || inv.total * 1.2;
-  const lines = [`✅ Прихід записано як накладна на ${grossTotal.toFixed(2)} ₴ (очікує підтвердження в реєстрі накладних):`];
+  const lines = outcome.appended
+    ? [`✅ Додано до накладної Фортуни за ${inv.date} (тепер ${inv.items.filter(i => !i.skipped).length} позицій), сума зараз ${grossTotal.toFixed(2)} ₴:`]
+    : [`✅ Прихід записано як накладна на ${grossTotal.toFixed(2)} ₴ (очікує підтвердження в реєстрі накладних):`];
   items.forEach(i => lines.push(`• ${i.name}: ${i.qty} ${unitLabel(i.unit)}`));
   await reply(chatId, lines.join('\n'));
 
@@ -694,14 +737,18 @@ router.post('/telegram/webhook', async (req, res) => {
     // ensureSupplier() creating a brand-new supplier silently — confirmed live: an OCR misread of
     // "СервісПако" as "СервісПакЮ" created a duplicate AND skipped that supplier's
     // isChemistrySupplier flag, running the whole накладна through food-catalog matching again.
-    // Asking the waiter is cheap and catches this at the source instead of guessing.
-    if (!matchedSupplier && result.supplier) {
+    // Asking the waiter is cheap and catches this at the source instead of guessing. Also asks when
+    // the AI read NO supplier at all (e.g. an informal market чек with no printed name) — a Фортуна
+    // чек commonly has none, and without a resolved "Фортуна" name here, appendOrCreateDailyInvoice
+    // has nothing to group same-day submissions by.
+    if (!matchedSupplier) {
       const pendingSupplier = await readJSON('pendingSupplierConfirm.json', {});
       pendingSupplier[chatId] = { result, fileId: largest.file_id, submittedByLabel, timestamp: new Date().toISOString() };
       await writeJSON('pendingSupplierConfirm.json', pendingSupplier);
-      await reply(chatId,
-        `⚠️ Не впізнав постачальника на фото: "${result.supplier}".\n\n` +
-        `Якщо назва правильна — напишіть "так". Якщо ні — напишіть правильну назву постачальника.`);
+      await reply(chatId, result.supplier
+        ? `⚠️ Не впізнав постачальника на фото: "${result.supplier}".\n\n` +
+          `Якщо назва правильна — напишіть "так". Якщо ні — напишіть правильну назву постачальника.`
+        : `⚠️ Не визначив постачальника на фото (наприклад, чек без назви). Напишіть, будь ласка, назву постачальника (наприклад: Фортуна).`);
       return res.sendStatus(200);
     }
 
