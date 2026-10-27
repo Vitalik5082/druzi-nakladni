@@ -7,7 +7,7 @@
 // Mounted BEFORE the Supabase-auth middleware (same reason as routes/telegram.js — the caller here
 // is GitHub Actions, not a logged-in browser) and gated by its own shared secret instead.
 const express = require('express');
-const { readJSON, writeJSON } = require('../lib/store');
+const { claimOnce, releaseClaim } = require('../lib/store');
 
 // Vercel's build statically scans for `require("literal string")` to decide which files belong in
 // the serverless bundle — a dynamic `require(someVariable)` isn't analyzable, so scripts/*.js
@@ -79,15 +79,19 @@ router.all('/cron/tick', async (req, res) => {
 
     // Both cron-job.org and GitHub Actions are kept running against this same endpoint (one as a
     // backup for the other) — two ticks landing close together inside the same 20-min window used
-    // to both read "not run today" before either wrote back, so Oleg/waiters/admin got some
-    // reminders twice. Re-reading fresh and claiming (writing the date) BEFORE running the job,
-    // instead of once at the very end, shrinks that race window from "however long the whole tick
-    // takes" down to just this one read+write — not a true atomic lock (kv_store has none to offer),
-    // but good enough for two schedulers 15 minutes apart.
-    const lastRun = await readJSON('cronLastRun.json', {});
-    if (lastRun[job.key] === now.date) continue; // already claimed/ran today
-    lastRun[job.key] = now.date;
-    await writeJSON('cronLastRun.json', lastRun);
+    // to both read "not run today" from cronLastRun.json before either wrote back, so Oleg/waiters/
+    // admin got some reminders twice (confirmed live). claimOnce() is a real atomic lock (a plain
+    // Postgres INSERT, unique on `key`) instead of that read-then-write race — exactly one tick can
+    // ever win the claim for a given job+date, no window to land inside at all.
+    const claimKey = `cronClaim:${job.key}:${now.date}`;
+    let claimed;
+    try {
+      claimed = await claimOnce(claimKey);
+    } catch (err) {
+      console.error(`cron claim check failed for ${job.key}:`, err);
+      continue; // can't verify the claim — skip rather than risk a double-send
+    }
+    if (!claimed) continue; // another tick already claimed (or ran) this job today
 
     try {
       await jobModules[job.key].main();
@@ -97,9 +101,7 @@ router.all('/cron/tick', async (req, res) => {
       results.push({ job: job.key, status: 'error', message: err.message });
       // Release the claim so a retry within the same window is still possible instead of silently
       // skipping the job for the rest of the day.
-      const rollback = await readJSON('cronLastRun.json', {});
-      delete rollback[job.key];
-      await writeJSON('cronLastRun.json', rollback);
+      await releaseClaim(claimKey).catch(e => console.error(`releaseClaim(${claimKey}) failed:`, e));
     }
   }
 

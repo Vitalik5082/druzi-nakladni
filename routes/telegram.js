@@ -5,8 +5,10 @@
 // header (set once via setWebhook).
 const express = require('express');
 const Fuse = require('fuse.js');
+const fs = require('fs');
+const path = require('path');
 const { readJSON, writeJSON, nextId } = require('../lib/store');
-const { normalize, findSupplier } = require('../lib/convert');
+const { normalize, findSupplier, includesWord } = require('../lib/convert');
 const { localDateStr, posterCall } = require('../lib/poster');
 const { recognizeInvoiceImage, recognizeReceiptImage, recognizeStockText, recognizeExpenseText } = require('./recognition');
 const { createInvoice, updateInvoice } = require('./invoices');
@@ -336,13 +338,31 @@ async function handleZReportPhoto(chatId, fileId, submittedByLabel, recipients) 
   }
 }
 
+function loadPcsAsGramsRules() {
+  try {
+    const portions = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'public', 'portions.json'), 'utf-8'));
+    return portions.pcs_as_grams || [];
+  } catch (e) { return []; }
+}
+
 // Converts a waiter's stated unit to the matched ingredient's own base unit (kg/l/p in Poster) —
-// г/грам(и)/g → kg, мл/ml → l, divided by 1000. Any count-type word (шт, ящик, пачка, упаковка...)
-// or an already-matching unit passes through unchanged.
-function convertToIngredientUnit(qty, statedUnit, baseUnit) {
+// г/грам(и)/g → kg, мл/ml → l, divided by 1000. A count-type word (шт/штук...) against a weight-
+// tracked base (kg/l) is only safe to pass through unchanged for ingredients genuinely sold AND
+// stocked by weight-equivalent count; for ones bought by the piece but stocked by weight (e.g.
+// avocado: 1шт = 200г per public/portions.json's pcs_as_grams), passing "1шт" straight through as
+// "1" silently recorded it as 1 KG (200x too much) instead of 0.2kg. Any nameText matching a
+// pcs_as_grams rule converts via that rule's g_per_pcs first; everything else keeps the old
+// behaviour (ящик, пачка, упаковка... with no such rule pass through unchanged).
+function convertToIngredientUnit(qty, statedUnit, baseUnit, nameTexts) {
   const u = (statedUnit || '').toLowerCase().trim();
   if (baseUnit === 'kg' && /^г(рам(а|ів)?)?$|^g$/.test(u)) return qty / 1000;
   if (baseUnit === 'l' && /^мл$|^ml$/.test(u)) return qty / 1000;
+
+  const isPieceUnit = /^шт\.?$|^штук(а|и)?$|^pcs$/i.test(u);
+  if (isPieceUnit && (baseUnit === 'kg' || baseUnit === 'l')) {
+    const rule = loadPcsAsGramsRules().find(r => (nameTexts || []).some(t => includesWord(t.toUpperCase(), r.key)));
+    if (rule) return (qty * rule.g_per_pcs) / 1000;
+  }
   return qty;
 }
 
@@ -422,7 +442,7 @@ async function handleStockText(chatId, text, submittedByLabel) {
     // A waiter's unit word (г/грам, мл) doesn't always match the ingredient's own base unit
     // (kg/l) — without converting, "Салямі 250 грам" silently became 250 KG in Poster once
     // (1000x). Count-type units (шт, ящик, пачка...) pass through unchanged against a 'p' base.
-    const qty = convertToIngredientUnit(item.qty, item.unit, ing.ingredient_unit);
+    const qty = convertToIngredientUnit(item.qty, item.unit, ing.ingredient_unit, [item.name, ing.ingredient_name]);
     matched.push({ ingredientId: ing.ingredient_id, name: ing.ingredient_name, unit: ing.ingredient_unit, qty, rawName: item.name });
   }
 
