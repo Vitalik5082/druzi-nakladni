@@ -199,7 +199,13 @@ router.post('/poster/sync-techcards', async (req, res) => {
       const modifications = [];
       for (const group of detail.group_modifications || []) {
         for (const m of group.modifications || []) {
-          const prepack = prepacks[m.ingredient_id];
+          // m.type distinguishes what m.ingredient_id points into: 3 = a prepack (напівфабрикат,
+          // keyed by product_id), anything else (10 = seen for plain ingredients) = a raw ingredient
+          // (keyed by ingredient_id, a DIFFERENT numbering space). Without this check, a numeric
+          // collision between the two spaces causes a false match - e.g. ingredient_id 47 is the
+          // raw ingredient "Тех Сік" (liters), but prepack product_id 47 happens to be an unrelated
+          // "Чікен" burger prepack, which used to get wrongly attached to the "СІК" juice product.
+          const prepack = m.type === 3 ? prepacks[m.ingredient_id] : null;
           const ref = ingredientsRef[m.ingredient_id];
           // Poster doesn't give modifications their own structure_unit (unlike regular техкарта
           // lines) — m.brutto is always in the ingredient's SUB-unit (ml for a litre-tracked
@@ -237,7 +243,7 @@ router.post('/poster/sync-techcards', async (req, res) => {
         const expandedKey = `${p.product_id}_${normalizeModName(m.name)}`;
         let modifierLines;
 
-        const prepack = prepacks[m.ingredient_id];
+        const prepack = m.isPrepack ? prepacks[m.ingredient_id] : null;
         if (prepack) {
           const ratio = prepack.out > 0 ? m.brutto / prepack.out : 1;
           modifierLines = prepack.ingredients.map(pi => ({
