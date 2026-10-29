@@ -102,6 +102,27 @@ async function forwardReceiptPhoto(invoice, fileId, excludeChatId, amount) {
   }
 }
 
+// No накладна matched by amount (wrong/stale balance, OCR misread the sum, or the накладна it
+// pays simply isn't in the system yet) — something was still genuinely paid, so drop the photo
+// silently and the payment just disappears. Forward it to admin instead; they attach it to the
+// right накладна manually on the site (reєстр накладних → "Оплата") since the bot has nothing
+// to go on here.
+async function forwardUnmatchedReceiptPhoto(fileId, excludeChatId, amount, recipient, date) {
+  const recipients = await readJSON('telegramRecipients.json', []);
+  const toNotify = recipients.filter(r =>
+    ['admin', 'accountant'].includes(r.role) && String(r.chatId) !== String(excludeChatId));
+  for (const r of toNotify) {
+    try {
+      await tg('sendPhoto', {
+        chat_id: r.chatId,
+        photo: fileId,
+        caption: `⚠️ Чек на ${amount.toFixed(2)} ₴${recipient ? ' (отримувач: ' + recipient + ')' : ''}${date ? ', ' + date : ''} — ` +
+          `не знайшов відповідної накладної автоматично.\nПеревірте вручну на сайті в розділі "Накладні" і позначте потрібну як оплачену.`
+      });
+    } catch (e) { console.error('Unmatched receipt photo forward failed:', e); }
+  }
+}
+
 async function handleCallback(callbackQuery) {
   const chatId = String(callbackQuery.message.chat.id);
   const messageId = callbackQuery.message.message_id;
@@ -329,6 +350,7 @@ async function handleReceiptPhoto(chatId, base64, fileId) {
     await reply(chatId,
       `⚠️ Не знайшов накладної з боргом ${result.amount.toFixed(2)} ₴${result.recipient ? ' (отримувач: ' + result.recipient + ')' : ''}. ` +
       `Перевірте вручну на сайті в розділі "Накладні".`);
+    if (fileId) await forwardUnmatchedReceiptPhoto(fileId, chatId, result.amount, result.recipient, result.date);
     return;
   }
 
