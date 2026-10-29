@@ -377,13 +377,23 @@ function unitLabel(u) { return UNIT_DISPLAY[u] || u; }
 // reported one at a time in a day = 10 накладні) instead of one накладна per day listing them all.
 function isFortunaSupplier(name) { return (name || '').toLowerCase().includes('фортуна'); }
 
+// ОлегКруасан (bread/buns) text-прихід reports are simple and reliable enough (almost always one
+// item, e.g. "булочок 56 шт") that the user wants them pushed into Poster stock immediately instead
+// of sitting pendingReview until someone opens the реєстр накладних and clicks "✓ Підтвердити" -
+// unlike every other text-прихід supplier, where a human should eyeball the AI-matched items first
+// before they hit real stock/cost. A накладна from this supplier (2026-10-24, 56 Булочка Бріош)
+// sat unreviewed for 5 days and never reached Poster's залишки until confirmed by hand - this is
+// the fix so it doesn't happen again for this specific supplier.
+function isOlegCroissantSupplier(name) { return (name || '').toLowerCase().includes('олегкруасан'); }
+
 // Shared by finalizeInvoiceCreation (photo чек) and handleStockAmountReply (text прихід) — once the
 // supplier is known to be Фортуна, append newItems to today's still-pendingReview Фортуна накладна
 // instead of creating a new one; any other supplier keeps the old one-document-per-submission
 // behaviour untouched.
 async function appendOrCreateDailyInvoice({ supplierName, date, items, source, submittedBy }) {
   if (!isFortunaSupplier(supplierName)) {
-    return { appended: false, created: await createInvoice({ supplier: supplierName, date, items, source, submittedBy, pendingReview: true }) };
+    const autoConfirm = isOlegCroissantSupplier(supplierName);
+    return { appended: false, created: await createInvoice({ supplier: supplierName, date, items, source, submittedBy, pendingReview: !autoConfirm }) };
   }
 
   const invoices = await readJSON(FILE, []);
@@ -521,11 +531,13 @@ async function handleStockAmountReply(chatId, text, pendingEntry, recipients) {
   }
   const inv = outcome.appended ? outcome.invoice : outcome.created.invoice;
 
-  // No Poster push here — this накладна is pendingReview:true, same as any OCR'd накладна from a
-  // photo. It only reaches Poster once an admin reviews and confirms it from the реєстр накладних
+  // No Poster push here for most suppliers — the накладна is pendingReview:true (set inside
+  // appendOrCreateDailyInvoice/createInvoice), same as any OCR'd накладна from a photo. It only
+  // reaches Poster once an admin reviews and confirms it from the реєстр накладних
   // (routes/invoices.js's updateInvoice() does the push, triggered by pendingReview flipping to
   // false), exactly like the photo-OCR flow. Nobody but the waiter has looked at this yet — pushing
-  // it into Poster's real stock/cost immediately, before any review, was the original design flaw.
+  // it into Poster's real stock/cost immediately, before any review, was the original design flaw -
+  // except ОлегКруасан (see isOlegCroissantSupplier), which skips the review gate on purpose.
   const log = await readJSON('textSupplies.json', []);
   log.push({
     id: nextId(log), date: localDateStr(), timestamp: new Date().toISOString(), submittedBy,
