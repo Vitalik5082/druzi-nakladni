@@ -80,6 +80,28 @@ async function notifyStatusChange(invoice, statusText, excludeChatId) {
   }
 }
 
+// Forwards бухгалтер's receipt photo itself (not just a text summary) to admin/бухгалтер, in
+// parallel with markInvoicePaid — mirrors finalizeInvoiceCreation's накладна-photo forward.
+// Deliberately runs regardless of invoice.pendingReview: a чек can settle a debt before admin has
+// confirmed/pushed that накладна into Poster's приход (two independent steps), so admin is told
+// explicitly here when that confirmation is still outstanding.
+async function forwardReceiptPhoto(invoice, fileId, excludeChatId, amount) {
+  const recipients = await readJSON('telegramRecipients.json', []);
+  const toNotify = recipients.filter(r =>
+    ['admin', 'accountant'].includes(r.role) && String(r.chatId) !== String(excludeChatId));
+  for (const r of toNotify) {
+    try {
+      await tg('sendPhoto', {
+        chat_id: r.chatId,
+        photo: fileId,
+        caption: `✅ Чек оплати від бухгалтера (${amount.toFixed(2)} ₴) прив'язано до накладної:\n` +
+          `Постачальник: ${invoice.supplier}\nДата: ${invoice.date}\nСума: ${grossTotalOf(invoice).toFixed(2)} ₴` +
+          (invoice.pendingReview ? `\n⏳ Накладна ще не поставлена на приход в Poster — підтвердьте на сайті.` : '')
+      });
+    } catch (e) { console.error('Receipt photo forward failed:', e); }
+  }
+}
+
 async function handleCallback(callbackQuery) {
   const chatId = String(callbackQuery.message.chat.id);
   const messageId = callbackQuery.message.message_id;
@@ -109,7 +131,19 @@ async function handleCallback(callbackQuery) {
       chat_id: chatId, message_id: messageId,
       text: `✅ Чек прив'язано до: ${invoice.supplier}, ${invoice.date}, ${grossTotalOf(invoice).toFixed(2)} ₴`
     });
-    await notifyStatusChange(invoice, `✅ Оплачено (чек від бухгалтера, ${grossTotalOf(invoice).toFixed(2)} ₴)`, chatId);
+
+    // Recover the receipt photo stashed by handleReceiptPhoto when it couldn't auto-pick between
+    // several candidates (bухгалтер just resolved the ambiguity via this inline button) — forward
+    // the actual photo if we still have it, falling back to a text-only notify otherwise.
+    const pendingReceipt = await readJSON('pendingReceiptPhoto.json', {});
+    const receiptEntry = pendingReceipt[chatId];
+    if (receiptEntry) { delete pendingReceipt[chatId]; await writeJSON('pendingReceiptPhoto.json', pendingReceipt); }
+
+    if (receiptEntry && receiptEntry.fileId) {
+      await forwardReceiptPhoto(invoice, receiptEntry.fileId, chatId, receiptEntry.amount);
+    } else {
+      await notifyStatusChange(invoice, `✅ Оплачено (чек від бухгалтера, ${grossTotalOf(invoice).toFixed(2)} ₴)`, chatId);
+    }
     return;
   }
 
@@ -265,8 +299,11 @@ async function finalizeInvoiceCreation(chatId, supplierName, result, fileId, sub
 
 // Бухгалтер drops a payment receipt photo — match it to outstanding debt by remaining balance
 // (± 1 ₴, same tolerance the invoice-duplicate check uses) and, if the receipt shows a
-// recognizable recipient, narrow further by supplier.
-async function handleReceiptPhoto(chatId, base64) {
+// recognizable recipient, narrow further by supplier. Matching intentionally ignores
+// invoice.pendingReview — a накладна admin hasn't yet confirmed/pushed to Poster's приход can
+// still legitimately be paid (ex: supplier delivers on credit, бухгалтер settles the invoice
+// before admin gets around to checking the item list) — those are two independent steps.
+async function handleReceiptPhoto(chatId, base64, fileId) {
   const result = await recognizeReceiptImage(base64, 'image/jpeg');
 
   if (!result.amount) {
@@ -301,8 +338,17 @@ async function handleReceiptPhoto(chatId, base64) {
     await reply(chatId,
       `✅ Чек на ${result.amount.toFixed(2)} ₴ прив'язано до накладної:\n` +
       `Постачальник: ${inv.supplier}\nДата: ${inv.date}\nСума: ${grossTotalOf(inv).toFixed(2)} ₴`);
-    await notifyStatusChange(inv, `✅ Оплачено (чек від бухгалтера, ${result.amount.toFixed(2)} ₴)`, chatId);
+    if (fileId) await forwardReceiptPhoto(inv, fileId, chatId, result.amount);
+    else await notifyStatusChange(inv, `✅ Оплачено (чек від бухгалтера, ${result.amount.toFixed(2)} ₴)`, chatId);
     return;
+  }
+
+  // Can't auto-forward the photo yet (don't know which накладна it belongs to) — stash fileId so
+  // handleCallback's receiptMatch branch can forward it once бухгалтер picks one below.
+  if (fileId) {
+    const pendingReceipt = await readJSON('pendingReceiptPhoto.json', {});
+    pendingReceipt[chatId] = { fileId, amount: result.amount, timestamp: new Date().toISOString() };
+    await writeJSON('pendingReceiptPhoto.json', pendingReceipt);
   }
 
   await tg('sendMessage', {
@@ -747,7 +793,7 @@ router.post('/telegram/webhook', async (req, res) => {
     // бухгалтер sends payment receipts, not invoices — completely different document and flow.
     if (sender.role === 'accountant') {
       await reply(chatId, '📷 Отримав чек, шукаю відповідну накладну...');
-      await handleReceiptPhoto(chatId, base64);
+      await handleReceiptPhoto(chatId, base64, largest.file_id);
       return res.sendStatus(200);
     }
 
