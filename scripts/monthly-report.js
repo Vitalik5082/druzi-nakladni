@@ -33,6 +33,7 @@ async function computeDashboard(from, to) {
   const invoices = (await readJSON('invoices.json', [])).filter(i => i.date >= from && i.date <= to);
   const expenses = (await readJSON('expenses.json', [])).filter(e => e.date >= from && e.date <= to);
   const payroll = (await readJSON('payroll.json', [])).filter(p => p.date >= from && p.date <= to);
+  const posterSales = await readJSON('posterSales.json', {});
 
   const posterFinance = await readJSON('posterFinance.json', {});
   const financeDates = Object.keys(posterFinance).filter(d => d >= from && d <= to);
@@ -44,14 +45,42 @@ async function computeDashboard(from, to) {
     }
   }
 
-  const revenue = cashDays.reduce((s, d) => s + (d.revenue || 0), 0);
-  const goods = invoices.reduce((s, i) => s + (i.total || 0), 0);
-  const otherExpenses = expenses.reduce((s, e) => s + (e.amount || 0), 0) + otherExpensesFromPoster;
-  const payrollTotal = payroll.reduce((s, p) => s + (p.amount || 0), 0) + payrollFromPoster;
-  const profit = revenue - goods - otherExpenses - payrollTotal;
-  const foodCostPct = revenue > 0 ? (goods / revenue * 100) : null;
+  // Собівартість проданих товарів — так само, як routes/dashboard.js (веб-сайт): кожен проданий
+  // рядок вже несе product_profit (= product_sum мінус собівартість за техкартою на момент
+  // продажу), тож cogs = sum(grossSum) - sum(profit). Це НЕ "goods" (сума накладних за період) —
+  // накладні відображають закупівлю (кеш-відтік постачальникам), а не собівартість того, що
+  // реально продано цього періоду; за місяці без заведених накладних (вересень/жовтень) старий
+  // goods-based розрахунок сильно спотворював фудкост% — саме це й розійшлося з сайтом.
+  const salesDates = Object.keys(posterSales).filter(d => d >= from && d <= to);
+  let salesGross = 0, salesProfit = 0;
+  for (const date of salesDates) {
+    for (const item of posterSales[date] || []) {
+      salesGross += item.grossSum || 0;
+      salesProfit += item.profit || 0;
+    }
+  }
+  const cogs = Number((salesGross - salesProfit).toFixed(2));
 
-  return { revenue, goods, otherExpenses, payroll: payrollTotal, profit, foodCostPct };
+  const revenue = cashDays.reduce((s, d) => s + (d.revenue || 0), 0);
+
+  // "Хімія" товари в накладній — реальна витрата (знижує прибуток), але не собівартість товарів.
+  let goods = 0, chemistryCost = 0;
+  for (const inv of invoices) {
+    for (const item of inv.items || []) {
+      if (item.skipped) continue;
+      if (item.isChemistry) chemistryCost += item.total || 0;
+      else goods += item.total || 0;
+    }
+  }
+  chemistryCost = Number(chemistryCost.toFixed(2));
+  goods = Number(goods.toFixed(2));
+
+  const otherExpenses = Number((expenses.reduce((s, e) => s + (e.amount || 0), 0) + otherExpensesFromPoster + chemistryCost).toFixed(2));
+  const payrollTotal = payroll.reduce((s, p) => s + (p.amount || 0), 0) + payrollFromPoster;
+  const profit = Number((revenue - cogs - otherExpenses - payrollTotal).toFixed(2));
+  const foodCostPct = revenue > 0 ? Number((cogs / revenue * 100).toFixed(1)) : null;
+
+  return { revenue, goods, cogs, otherExpenses, payroll: payrollTotal, profit, foodCostPct };
 }
 
 async function main() {
@@ -62,6 +91,7 @@ async function main() {
     `📅 <b>Місячний звіт: ${from} — ${to}</b>`, '',
     `💰 Виручка: <b>${d.revenue.toFixed(2)} ₴</b>`,
     `📦 Товари (накладні): ${d.goods.toFixed(2)} ₴`,
+    `🧮 Собівартість продажів (COGS): ${d.cogs.toFixed(2)} ₴`,
     `🧾 Інші витрати: ${d.otherExpenses.toFixed(2)} ₴`,
     `👷 ЗП: ${d.payroll.toFixed(2)} ₴`,
     `📊 Фудкост: ${d.foodCostPct !== null ? d.foodCostPct.toFixed(1) + '%' : '—'}`,
