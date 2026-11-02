@@ -402,7 +402,7 @@ function renderInvoiceRow(inv) {
     <div class="inv-head" onclick="toggleInvoice(${inv.id})">
       <div class="inv-meta">
         <span class="inv-chevron" style="display:inline-block;transition:transform .15s;color:var(--text3)">▸</span>
-        <span>${inv.date}</span>
+        <span>${inv.date}${inv.number ? ' №' + escHtml(inv.number) : ''}</span>
         <span>${inv.items.filter(i=>!i.skipped).length} позицій</span>
         <select class="supplier-select" onclick="event.stopPropagation()" onchange="event.stopPropagation(); changeInvoiceSupplier(${inv.id}, this.value)"
           style="${inv.supplier ? '' : 'border-color:var(--danger);color:var(--danger)'}">

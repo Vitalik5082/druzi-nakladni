@@ -157,6 +157,7 @@ Format: {
   "documentType": "invoice" | "zreport" | "other",
   "supplier": "supplier/vendor name as printed on the invoice letterhead (see supplier-identification rules below), or empty string if not visible",
   "date": "invoice date in YYYY-MM-DD format, or empty string if not visible",
+  "number": "the накладна's own printed document number (e.g. from '№123', 'Накладна N 456', 'Видаткова накладна №РН-0000123'), exactly as printed including any letters/dashes, or empty string if not visible",
   "invoiceTotal": number (the printed grand total of the invoice, "Всього"/"Разом"/"Сума", without VAT if that's what's printed; 0 if not visible),
   "items": [ { "name": "product name", "qty": number, "unit": "kg|g|pcs|l|ml", "price": number, "total": number } ]
 }
@@ -246,6 +247,7 @@ async function recognizeInvoiceImage(imageBase64, mimeType) {
   const parsedItems = Array.isArray(parsedData) ? parsedData : parsedData.items;
   const aiSupplier = Array.isArray(parsedData) ? '' : (parsedData.supplier || '').trim();
   const aiDate = Array.isArray(parsedData) ? '' : (parsedData.date || '').trim();
+  const aiNumber = Array.isArray(parsedData) ? '' : (parsedData.number || '').trim();
   const aiInvoiceTotal = Array.isArray(parsedData) ? 0 : (Number(parsedData.invoiceTotal) || 0);
 
   if (!Array.isArray(parsedItems)) {
@@ -310,7 +312,7 @@ async function recognizeInvoiceImage(imageBase64, mimeType) {
     if (matched) supplier = matched.name;
   }
 
-  return { documentType: 'invoice', items: mapped, count: mapped.length, supplier, date: aiDate, warning };
+  return { documentType: 'invoice', items: mapped, count: mapped.length, supplier, date: aiDate, number: aiNumber, warning };
 }
 
 // Free-text stock receipt report ("Круасан 8 шт, Булочки 50шт") — a waiter typing what just got
@@ -412,8 +414,12 @@ async function recognizeReceiptImage(imageBase64, mimeType) {
         {
           type: "text",
           text: `Extract payment confirmation data from this receipt/квитанція (bank transfer receipt, cash receipt, or similar) image.
+Also look at the "Призначення платежу" (payment purpose) field, if present — Ukrainian bank transfer
+receipts commonly reference the original накладна/рахунок there, e.g. "Оплата за накладною №123 від
+01.11.2026" or "Рахунок-фактура № РН-45". Extract that referenced document number exactly as printed
+(including any letters/dashes), or empty string if no such reference is visible.
 Return ONLY a valid JSON object, no markdown, no explanation.
-Format: { "amount": number (the paid amount, 0 if not visible), "date": "YYYY-MM-DD or empty string if not visible", "recipient": "name of the recipient/payee (supplier/company being paid), or empty string if not visible" }`
+Format: { "amount": number (the paid amount, 0 if not visible), "date": "YYYY-MM-DD or empty string if not visible", "recipient": "name of the recipient/payee (supplier/company being paid), or empty string if not visible", "invoiceNumber": "накладна/рахунок number referenced in the payment purpose, or empty string if none" }`
         },
         { type: "image_url", image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: "high" } }
       ]
@@ -434,7 +440,8 @@ Format: { "amount": number (the paid amount, 0 if not visible), "date": "YYYY-MM
   return {
     amount: Number(parsed.amount) || 0,
     date: (parsed.date || '').trim(),
-    recipient: (parsed.recipient || '').trim()
+    recipient: (parsed.recipient || '').trim(),
+    invoiceNumber: (parsed.invoiceNumber || '').trim()
   };
 }
 

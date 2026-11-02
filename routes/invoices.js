@@ -78,7 +78,7 @@ function reverseVatDirection(items) {
 
 // Shared by the website's POST /invoices AND the Telegram bot. Returns either
 // { duplicate: true, existing } or { invoice }.
-async function createInvoice({ supplier, date, items, dueDate, force, source, submittedBy, pendingReview }) {
+async function createInvoice({ supplier, date, items, dueDate, force, source, submittedBy, pendingReview, number }) {
   if (!Array.isArray(items) || !items.length) {
     const err = new Error('No items');
     err.status = 400;
@@ -107,6 +107,7 @@ async function createInvoice({ supplier, date, items, dueDate, force, source, su
     id: nextId(invoices),
     date: invoiceDate,
     supplier: invoiceSupplier,
+    number: (number || '').trim() || null,
     items,
     total,
     total_with_vat: Number((total * VAT_RATE).toFixed(2)),

@@ -85,7 +85,7 @@ async function notifyStatusChange(invoice, statusText, excludeChatId) {
 // Deliberately runs regardless of invoice.pendingReview: a чек can settle a debt before admin has
 // confirmed/pushed that накладна into Poster's приход (two independent steps), so admin is told
 // explicitly here when that confirmation is still outstanding.
-async function forwardReceiptPhoto(invoice, fileId, excludeChatId, amount) {
+async function forwardReceiptPhoto(invoice, fileId, excludeChatId) {
   const recipients = await readJSON('telegramRecipients.json', []);
   const toNotify = recipients.filter(r =>
     ['admin', 'accountant'].includes(r.role) && String(r.chatId) !== String(excludeChatId));
@@ -94,12 +94,27 @@ async function forwardReceiptPhoto(invoice, fileId, excludeChatId, amount) {
       await tg('sendPhoto', {
         chat_id: r.chatId,
         photo: fileId,
-        caption: `✅ Чек оплати від бухгалтера (${amount.toFixed(2)} ₴) прив'язано до накладної:\n` +
-          `Постачальник: ${invoice.supplier}\nДата: ${invoice.date}\nСума: ${grossTotalOf(invoice).toFixed(2)} ₴` +
+        caption: `✅ Чек оплати від бухгалтера прив'язано до накладної:\n` +
+          `Постачальник: ${invoice.supplier}\nДата: ${invoice.date}${invoice.number ? ` (№${invoice.number})` : ''}\nСума: ${grossTotalOf(invoice).toFixed(2)} ₴` +
           (invoice.pendingReview ? `\n⏳ Накладна ще не поставлена на приход в Poster — підтвердьте на сайті.` : '')
       });
     } catch (e) { console.error('Receipt photo forward failed:', e); }
   }
+}
+
+// Накладна numbers get written/printed inconsistently ("№123", "No 123", "РН-0000123") — strip
+// everything but letters/digits and leading zeros before comparing, so a чек's "призначення
+// платежу" reference matches regardless of formatting differences.
+function normalizeInvoiceNumber(n) {
+  const alnum = String(n || '').replace(/[^0-9a-zа-яёіїєʼ]/gi, '').toLowerCase();
+  // Only the LETTER-PREFIX + DIGIT-SUFFIX shape ("РН0000123") gets zero-padding stripped — a plain
+  // regex stripping any "zeros followed by digits-to-end" would also mangle a genuinely trailing-zero
+  // number like "100" (first attempt did exactly that); anchoring the digit run to $ via a full-string
+  // match, then trimming only ITS leading zeros, doesn't have that failure mode.
+  const m = alnum.match(/^([a-zа-яёіїєʼ]*)(\d*)$/);
+  if (!m) return alnum; // unusual shape (e.g. digits-then-letters) — compare as-is
+  const [, prefix, digits] = m;
+  return prefix + digits.replace(/^0+(?=\d)/, '');
 }
 
 // No накладна matched by amount (wrong/stale balance, OCR misread the sum, or the накладна it
@@ -107,7 +122,7 @@ async function forwardReceiptPhoto(invoice, fileId, excludeChatId, amount) {
 // silently and the payment just disappears. Forward it to admin instead; they attach it to the
 // right накладна manually on the site (reєстр накладних → "Оплата") since the bot has nothing
 // to go on here.
-async function forwardUnmatchedReceiptPhoto(fileId, excludeChatId, amount, recipient, date) {
+async function forwardUnmatchedReceiptPhoto(fileId, excludeChatId, amount, recipient, date, invoiceNumber) {
   const recipients = await readJSON('telegramRecipients.json', []);
   const toNotify = recipients.filter(r =>
     ['admin', 'accountant'].includes(r.role) && String(r.chatId) !== String(excludeChatId));
@@ -116,7 +131,8 @@ async function forwardUnmatchedReceiptPhoto(fileId, excludeChatId, amount, recip
       await tg('sendPhoto', {
         chat_id: r.chatId,
         photo: fileId,
-        caption: `⚠️ Чек на ${amount.toFixed(2)} ₴${recipient ? ' (отримувач: ' + recipient + ')' : ''}${date ? ', ' + date : ''} — ` +
+        caption: `⚠️ Чек${amount ? ' на ' + amount.toFixed(2) + ' ₴' : ' (сума не розпізнана)'}` +
+          `${invoiceNumber ? ' №' + invoiceNumber : ''}${recipient ? ' (отримувач: ' + recipient + ')' : ''}${date ? ', ' + date : ''} — ` +
           `не знайшов відповідної накладної автоматично.\nПеревірте вручну на сайті в розділі "Накладні" і позначте потрібну як оплачену.`
       });
     } catch (e) { console.error('Unmatched receipt photo forward failed:', e); }
@@ -169,7 +185,7 @@ async function handleCallback(callbackQuery) {
     if (receiptEntry) { delete pendingReceipt[chatId]; await writeJSON('pendingReceiptPhoto.json', pendingReceipt); }
 
     if (receiptEntry && receiptEntry.fileId) {
-      await forwardReceiptPhoto(invoice, receiptEntry.fileId, chatId, receiptEntry.amount);
+      await forwardReceiptPhoto(invoice, receiptEntry.fileId, chatId);
     } else {
       await notifyStatusChange(invoice, `✅ Оплачено (чек від бухгалтера, ${grossTotalOf(invoice).toFixed(2)} ₴)`, chatId);
     }
@@ -266,7 +282,7 @@ async function handlePaymentText(chatId, amount) {
 // sender, asks payment status, and forwards the photo + AI self-check warning to admin/бухгалтер.
 async function finalizeInvoiceCreation(chatId, supplierName, result, fileId, submittedByLabel, recipients) {
   const outcome = await appendOrCreateDailyInvoice({
-    supplierName, date: result.date, items: result.items, source: 'telegram', submittedBy: submittedByLabel
+    supplierName, date: result.date, items: result.items, source: 'telegram', submittedBy: submittedByLabel, number: result.number
   });
 
   if (!outcome.appended && outcome.created.duplicate) {
@@ -335,41 +351,61 @@ async function finalizeInvoiceCreation(chatId, supplierName, result, fileId, sub
 async function handleReceiptPhoto(chatId, base64, fileId) {
   const result = await recognizeReceiptImage(base64, 'image/jpeg');
 
-  if (!result.amount) {
-    await reply(chatId, '⚠️ Не вдалось розпізнати суму на чеку. Перевірте вручну на сайті.');
-    return;
-  }
-
   const invoices = await readJSON(FILE, []);
   const suppliers = await readJSON('suppliers.json', []);
 
-  let candidates = findOutstandingByAmount(invoices, result.amount);
-
-  if (candidates.length > 1 && result.recipient) {
-    const matchedSupplier = findSupplier(suppliers, result.recipient);
-    if (matchedSupplier) {
-      const narrowed = candidates.filter(x =>
-        (x.inv.supplier || '').toLowerCase() === matchedSupplier.name.toLowerCase());
+  // Strongest signal first: an explicit накладна number referenced in the чек's "призначення
+  // платежу" — unlike amount, it can't accidentally coincide with the WRONG накладна, so it's
+  // tried even when the amount itself wasn't recognized at all (which used to just give up here).
+  let candidates = [];
+  let matchedByNumber = false;
+  if (result.invoiceNumber) {
+    const normNum = normalizeInvoiceNumber(result.invoiceNumber);
+    candidates = invoices
+      .filter(inv => inv.number && normalizeInvoiceNumber(inv.number) === normNum)
+      .map(inv => ({ inv, balance: Number((grossTotalOf(inv) - (inv.paidAmount || 0)).toFixed(2)) }));
+    if (candidates.length > 1 && result.date) {
+      const narrowed = candidates.filter(c => c.inv.date === result.date);
       if (narrowed.length) candidates = narrowed;
     }
+    matchedByNumber = candidates.length > 0;
   }
 
-  if (!candidates.length) {
-    await reply(chatId,
-      `⚠️ Не знайшов накладної з боргом ${result.amount.toFixed(2)} ₴${result.recipient ? ' (отримувач: ' + result.recipient + ')' : ''}. ` +
-      `Перевірте вручну на сайті в розділі "Накладні".`);
-    if (fileId) await forwardUnmatchedReceiptPhoto(fileId, chatId, result.amount, result.recipient, result.date);
-    return;
+  if (!matchedByNumber) {
+    if (!result.amount) {
+      await reply(chatId, '⚠️ Не вдалось розпізнати ні суму, ні номер накладної на чеку. Перевірте вручну на сайті.');
+      if (fileId) await forwardUnmatchedReceiptPhoto(fileId, chatId, 0, result.recipient, result.date, result.invoiceNumber);
+      return;
+    }
+
+    candidates = findOutstandingByAmount(invoices, result.amount);
+
+    if (candidates.length > 1 && result.recipient) {
+      const matchedSupplier = findSupplier(suppliers, result.recipient);
+      if (matchedSupplier) {
+        const narrowed = candidates.filter(x =>
+          (x.inv.supplier || '').toLowerCase() === matchedSupplier.name.toLowerCase());
+        if (narrowed.length) candidates = narrowed;
+      }
+    }
+
+    if (!candidates.length) {
+      await reply(chatId,
+        `⚠️ Не знайшов накладної з боргом ${result.amount.toFixed(2)} ₴${result.recipient ? ' (отримувач: ' + result.recipient + ')' : ''}. ` +
+        `Перевірте вручну на сайті в розділі "Накладні".`);
+      if (fileId) await forwardUnmatchedReceiptPhoto(fileId, chatId, result.amount, result.recipient, result.date, result.invoiceNumber);
+      return;
+    }
   }
 
   if (candidates.length === 1) {
     const { inv } = candidates[0];
     await markInvoicePaid(inv, result.date || undefined);
     await reply(chatId,
-      `✅ Чек на ${result.amount.toFixed(2)} ₴ прив'язано до накладної:\n` +
+      `✅ Чек${matchedByNumber ? ` (№${result.invoiceNumber})` : ` на ${result.amount.toFixed(2)} ₴`} прив'язано до накладної:\n` +
       `Постачальник: ${inv.supplier}\nДата: ${inv.date}\nСума: ${grossTotalOf(inv).toFixed(2)} ₴`);
-    if (fileId) await forwardReceiptPhoto(inv, fileId, chatId, result.amount);
-    else await notifyStatusChange(inv, `✅ Оплачено (чек від бухгалтера, ${result.amount.toFixed(2)} ₴)`, chatId);
+    if (fileId) await forwardReceiptPhoto(inv, fileId, chatId);
+    else await notifyStatusChange(inv, `✅ Оплачено (чек від бухгалтера, ${grossTotalOf(inv).toFixed(2)} ₴)`, chatId);
     return;
   }
 
@@ -377,13 +413,13 @@ async function handleReceiptPhoto(chatId, base64, fileId) {
   // handleCallback's receiptMatch branch can forward it once бухгалтер picks one below.
   if (fileId) {
     const pendingReceipt = await readJSON('pendingReceiptPhoto.json', {});
-    pendingReceipt[chatId] = { fileId, amount: result.amount, timestamp: new Date().toISOString() };
+    pendingReceipt[chatId] = { fileId, timestamp: new Date().toISOString() };
     await writeJSON('pendingReceiptPhoto.json', pendingReceipt);
   }
 
   await tg('sendMessage', {
     chat_id: chatId,
-    text: `💳 Чек на ${result.amount.toFixed(2)} ₴ підходить до кількох накладних — оберіть потрібну:`,
+    text: `💳 Чек${matchedByNumber ? ` (№${result.invoiceNumber})` : ` на ${result.amount.toFixed(2)} ₴`} підходить до кількох накладних — оберіть потрібну:`,
     reply_markup: {
       inline_keyboard: candidates.slice(0, 8).map(({ inv }) => ([{
         text: `${inv.supplier} — ${inv.date} — ${grossTotalOf(inv).toFixed(2)} ₴`,
@@ -466,10 +502,10 @@ function isOlegCroissantSupplier(name) { return (name || '').toLowerCase().inclu
 // supplier is known to be Фортуна, append newItems to today's still-pendingReview Фортуна накладна
 // instead of creating a new one; any other supplier keeps the old one-document-per-submission
 // behaviour untouched.
-async function appendOrCreateDailyInvoice({ supplierName, date, items, source, submittedBy }) {
+async function appendOrCreateDailyInvoice({ supplierName, date, items, source, submittedBy, number }) {
   if (!isFortunaSupplier(supplierName)) {
     const autoConfirm = isOlegCroissantSupplier(supplierName);
-    return { appended: false, created: await createInvoice({ supplier: supplierName, date, items, source, submittedBy, pendingReview: !autoConfirm }) };
+    return { appended: false, created: await createInvoice({ supplier: supplierName, date, items, source, submittedBy, pendingReview: !autoConfirm, number }) };
   }
 
   const invoices = await readJSON(FILE, []);
@@ -477,7 +513,7 @@ async function appendOrCreateDailyInvoice({ supplierName, date, items, source, s
     inv.date === date && isFortunaSupplier(inv.supplier) && inv.pendingReview === true);
 
   if (!existing) {
-    return { appended: false, created: await createInvoice({ supplier: supplierName, date, items, source, submittedBy, pendingReview: true }) };
+    return { appended: false, created: await createInvoice({ supplier: supplierName, date, items, source, submittedBy, pendingReview: true, number }) };
   }
 
   // Fresh ids continuing past whatever's already on the invoice — the website's edit/match-modal
