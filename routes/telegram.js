@@ -131,6 +131,14 @@ async function handleCallback(callbackQuery) {
   const payMatch = data.match(/^pay:(yes|no):(\d+)$/);
   const receiptMatch = data.match(/^recv:(\d+)$/);
   const paytextMatch = data.match(/^paytext:(yes|no):(\d+)$/);
+  const expCatUseMatch = data.match(/^expcat:use:(.+)$/);
+  const expCatNew = data === 'expcat:new';
+  const expCatCancel = data === 'expcat:cancel';
+
+  if (expCatUseMatch || expCatNew || expCatCancel) {
+    await handleExpenseCategoryCallback(chatId, messageId, callbackQuery.id, expCatUseMatch ? expCatUseMatch[1] : null, expCatNew, expCatCancel);
+    return;
+  }
 
   if (!payMatch && !receiptMatch && !paytextMatch) {
     await tg('answerCallbackQuery', { callback_query_id: callbackQuery.id });
@@ -675,6 +683,130 @@ async function handleAccountantExpenseText(chatId, text, month) {
   }
 }
 
+// Admin reports an expense spontaneously, any time ("Витрата: Комуналка 7200грн") — dated today,
+// no pending reminder state needed (unlike handleAccountantExpenseText above). Known categories
+// (EXPENSE_CATEGORIES + anything admin already confirmed as a new category before, in
+// customExpenseCategories.json) get saved immediately; anything recognizeExpenseText couldn't
+// match gets queued and asked about one at a time via inline buttons (askExpenseCategoryChoice).
+async function handleAdminExpenseText(chatId, text, recipients) {
+  await reply(chatId, '📝 Записую витрати...');
+
+  const customCategories = await readJSON('customExpenseCategories.json', []);
+  const knownCategories = [...EXPENSE_CATEGORIES, ...customCategories];
+
+  let parsed;
+  try {
+    parsed = await recognizeExpenseText(text, knownCategories);
+  } catch (e) {
+    await reply(chatId, '⚠️ Не вдалось розпізнати текст. Спробуйте, наприклад: "Витрата: Комуналка 7200грн".');
+    return;
+  }
+
+  if (!parsed.items.length) {
+    await reply(chatId, '⚠️ Не знайшов жодної суми у повідомленні. Спробуйте, наприклад: "Витрата: Комуналка 7200грн".');
+    return;
+  }
+
+  const date = localDateStr();
+  const known = parsed.items.filter(i => knownCategories.includes(i.category));
+  const unknown = parsed.items.filter(i => !knownCategories.includes(i.category));
+
+  if (known.length) {
+    const expenses = await readJSON('expenses.json', []);
+    const created = [];
+    for (const item of known) {
+      created.push(await createExpenseRecord(expenses, { date, category: item.category, description: 'Через бот (адмін)', amount: item.amount }));
+    }
+    await writeJSON('expenses.json', expenses);
+
+    await reply(chatId, `✅ Записано:\n${created.map(e =>
+      `${e.category}: ${e.amount.toFixed(2)} ₴${e.postedToPoster ? '' : ' (⚠️ не синхронізовано з Poster)'}`).join('\n')}`);
+
+    const toNotify = recipients.filter(r => ['admin', 'accountant'].includes(r.role) && String(r.chatId) !== chatId);
+    for (const r of toNotify) {
+      await reply(r.chatId, `💸 Витрату записано (через бот):\n${created.map(e => `${e.category}: ${e.amount.toFixed(2)} ₴`).join('\n')}`);
+    }
+  }
+
+  if (unknown.length) {
+    const pendingAll = await readJSON('pendingExpenseCategory.json', {});
+    const queue = unknown.map(i => ({ category: i.category, amount: i.amount, date }));
+    pendingAll[chatId] = { queue, timestamp: new Date().toISOString() };
+    await writeJSON('pendingExpenseCategory.json', pendingAll);
+    await askExpenseCategoryChoice(chatId, queue[0], knownCategories);
+  }
+}
+
+// Asks (inline buttons) whether an unrecognized category should use one of the known ones instead,
+// or be created as a brand new category — human-in-the-loop, since "create new" also means it will
+// never sync to Poster until someone links a real Poster finance category_id to it by hand.
+async function askExpenseCategoryChoice(chatId, pendingItem, knownCategories) {
+  const buttons = knownCategories.map(c => ([{ text: c, callback_data: `expcat:use:${c}` }]));
+  buttons.push([{ text: `➕ Створити нову категорію "${pendingItem.category}"`, callback_data: 'expcat:new' }]);
+  buttons.push([{ text: '❌ Скасувати', callback_data: 'expcat:cancel' }]);
+  await tg('sendMessage', {
+    chat_id: chatId,
+    text: `Категорію "${pendingItem.category}" (${pendingItem.amount.toFixed(2)} ₴) не знайшов у списку. Обрати існуючу, чи створити нову?`,
+    reply_markup: { inline_keyboard: buttons }
+  });
+}
+
+// handleCallback's expcat: branch — resolves one queued unknown-category expense, then moves on to
+// the next one in the same chat's queue (one inline prompt at a time) until it's empty.
+async function handleExpenseCategoryCallback(chatId, messageId, callbackQueryId, chosenCategory, isNew, isCancel) {
+  const pendingAll = await readJSON('pendingExpenseCategory.json', {});
+  const pending = pendingAll[chatId];
+  if (!pending || !pending.queue.length) {
+    await tg('answerCallbackQuery', { callback_query_id: callbackQueryId, text: 'Запит застарів' });
+    return;
+  }
+
+  const [current, ...rest] = pending.queue;
+
+  if (isCancel) {
+    await tg('answerCallbackQuery', { callback_query_id: callbackQueryId, text: 'Скасовано' });
+    await tg('editMessageText', {
+      chat_id: chatId, message_id: messageId,
+      text: `❌ Скасовано: "${current.category}" (${current.amount.toFixed(2)} ₴) не записано.`
+    });
+  } else {
+    const finalCategory = isNew ? current.category : chosenCategory;
+
+    if (isNew) {
+      const customCategories = await readJSON('customExpenseCategories.json', []);
+      if (!customCategories.includes(finalCategory)) {
+        customCategories.push(finalCategory);
+        await writeJSON('customExpenseCategories.json', customCategories);
+      }
+    }
+
+    const expenses = await readJSON('expenses.json', []);
+    const expense = await createExpenseRecord(expenses, {
+      date: current.date, category: finalCategory, description: 'Через бот (адмін)', amount: current.amount
+    });
+    await writeJSON('expenses.json', expenses);
+
+    await tg('answerCallbackQuery', { callback_query_id: callbackQueryId, text: 'Записано' });
+    await tg('editMessageText', {
+      chat_id: chatId, message_id: messageId,
+      text: `✅ Записано: ${finalCategory} — ${current.amount.toFixed(2)} ₴` +
+        (isNew
+          ? '\n⚠️ Нова категорія — в Poster не синхронізовано (там такої категорії ще нема). Створи її в Poster вручну і скажи мені category_id, щоб синхронізація запрацювала.'
+          : (expense.postedToPoster ? '' : '\n⚠️ Не вдалось синхронізувати з Poster.'))
+    });
+  }
+
+  if (rest.length) {
+    pendingAll[chatId] = { ...pending, queue: rest };
+    await writeJSON('pendingExpenseCategory.json', pendingAll);
+    const customCategories = await readJSON('customExpenseCategories.json', []);
+    await askExpenseCategoryChoice(chatId, rest[0], [...EXPENSE_CATEGORIES, ...customCategories]);
+  } else {
+    delete pendingAll[chatId];
+    await writeJSON('pendingExpenseCategory.json', pendingAll);
+  }
+}
+
 router.post('/telegram/webhook', async (req, res) => {
   const secret = req.headers['x-telegram-bot-api-secret-token'];
   if (process.env.TELEGRAM_WEBHOOK_SECRET && secret !== process.env.TELEGRAM_WEBHOOK_SECRET) {
@@ -754,6 +886,14 @@ router.post('/telegram/webhook', async (req, res) => {
         await handlePaymentText(chatId, parseFloat(paymentMatch[1].replace(',', '.')));
         return res.sendStatus(200);
       }
+    }
+
+    // Admin reports an expense anytime ("Витрата: Комуналка 7200грн", "Витрати: Податки 5000,
+    // Ремонт 800грн") — unlike handleAccountantExpenseText (only fires as a reply to the
+    // 15th-of-month reminder), this has no pending-state requirement: any admin, any time.
+    if (!message.photo?.length && message.text && sender.role === 'admin' && /^витрат/i.test(message.text.trim())) {
+      await handleAdminExpenseText(chatId, message.text.trim(), recipients);
+      return res.sendStatus(200);
     }
 
     if (!message.photo || !message.photo.length) {
