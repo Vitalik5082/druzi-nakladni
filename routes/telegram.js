@@ -342,14 +342,54 @@ async function finalizeInvoiceCreation(chatId, supplierName, result, fileId, sub
   }
 }
 
+// Shared by the normal накладна photo flow (admin/waiter/supplier) and handleReceiptPhoto's
+// redirect when a бухгалтер's photo turns out to be a накладна, not a чек — takes an already
+// OCR'd recognizeInvoiceImage result and does supplier matching + pendingReview creation, so both
+// callers get identical behaviour instead of a second, drifting copy of this logic.
+async function processInvoicePhoto(chatId, fileId, result, submittedByLabel, recipients) {
+  if (result.documentType === 'zreport') {
+    await handleZReportPhoto(chatId, fileId, submittedByLabel, recipients);
+    return;
+  }
+
+  const suppliers = await readJSON('suppliers.json', []);
+  const matchedSupplier = findSupplier(suppliers, result.supplier);
+
+  if (!matchedSupplier) {
+    const pendingSupplier = await readJSON('pendingSupplierConfirm.json', {});
+    pendingSupplier[chatId] = { result, fileId, submittedByLabel, timestamp: new Date().toISOString() };
+    await writeJSON('pendingSupplierConfirm.json', pendingSupplier);
+    await reply(chatId, result.supplier
+      ? `⚠️ Не впізнав постачальника на фото: "${result.supplier}".\n\n` +
+        `Якщо назва правильна — напишіть "так". Якщо ні — напишіть правильну назву постачальника.`
+      : `⚠️ Не визначив постачальника на фото (наприклад, чек без назви). Напишіть, будь ласка, назву постачальника (наприклад: Фортуна).`);
+    return;
+  }
+
+  await finalizeInvoiceCreation(chatId, matchedSupplier ? matchedSupplier.name : (result.supplier || ''), result, fileId, submittedByLabel, recipients);
+}
+
 // Бухгалтер drops a payment receipt photo — match it to outstanding debt by remaining balance
 // (± 1 ₴, same tolerance the invoice-duplicate check uses) and, if the receipt shows a
 // recognizable recipient, narrow further by supplier. Matching intentionally ignores
 // invoice.pendingReview — a накладна admin hasn't yet confirmed/pushed to Poster's приход can
 // still legitimately be paid (ex: supplier delivers on credit, бухгалтер settles the invoice
 // before admin gets around to checking the item list) — those are two independent steps.
-async function handleReceiptPhoto(chatId, base64, fileId) {
+async function handleReceiptPhoto(chatId, base64, fileId, submittedByLabel, recipients) {
   const result = await recognizeReceiptImage(base64, 'image/jpeg');
+
+  // Routing to this function is role-based (sender.role === 'accountant'), not content-based —
+  // бухгалтер occasionally photographs an actual накладна too (e.g. she also receives a
+  // delivery), and without this check it used to get force-fit into the payment-matching logic
+  // below, which only reads amount/recipient and had no idea what to do with a supplier+item
+  // list, so every such накладна came back misread as "this looks like a чек". The receipt prompt
+  // itself flags this case instead of a separate classification call.
+  if (result.documentType === 'invoice') {
+    await reply(chatId, '📄 Це схоже на накладну, а не чек — розпізнаю як накладну...');
+    const invoiceResult = await recognizeInvoiceImage(base64, 'image/jpeg');
+    await processInvoicePhoto(chatId, fileId, invoiceResult, submittedByLabel, recipients);
+    return;
+  }
 
   const invoices = await readJSON(FILE, []);
   const suppliers = await readJSON('suppliers.json', []);
@@ -989,46 +1029,17 @@ router.post('/telegram/webhook', async (req, res) => {
     const base64 = await downloadPhotoBase64(largest.file_id);
 
     // бухгалтер sends payment receipts, not invoices — completely different document and flow.
+    // (handleReceiptPhoto itself double-checks this against the photo's actual content and
+    // redirects to processInvoicePhoto below when she's really sent a накладна.)
     if (sender.role === 'accountant') {
       await reply(chatId, '📷 Отримав чек, шукаю відповідну накладну...');
-      await handleReceiptPhoto(chatId, base64, largest.file_id);
+      await handleReceiptPhoto(chatId, base64, largest.file_id, submittedByLabel, recipients);
       return res.sendStatus(200);
     }
 
     await reply(chatId, '📷 Отримав, розпізнаю накладну...');
     const result = await recognizeInvoiceImage(base64, 'image/jpeg');
-
-    // Catches a Z-звіт even when the scheduled 22:30 reminder never fired (so pendingZReport was
-    // never set) — content beats timing. Same handler as the flag-based path.
-    if (result.documentType === 'zreport') {
-      await handleZReportPhoto(chatId, largest.file_id, submittedByLabel, recipients);
-      return res.sendStatus(200);
-    }
-
-    const suppliers = await readJSON('suppliers.json', []);
-    const matchedSupplier = findSupplier(suppliers, result.supplier);
-
-    // Unrecognized supplier name (not just "AI found nothing" — AI DID read something off the
-    // document, it just doesn't match anyone in suppliers.json) used to fall straight into
-    // ensureSupplier() creating a brand-new supplier silently — confirmed live: an OCR misread of
-    // "СервісПако" as "СервісПакЮ" created a duplicate AND skipped that supplier's
-    // isChemistrySupplier flag, running the whole накладна through food-catalog matching again.
-    // Asking the waiter is cheap and catches this at the source instead of guessing. Also asks when
-    // the AI read NO supplier at all (e.g. an informal market чек with no printed name) — a Фортуна
-    // чек commonly has none, and without a resolved "Фортуна" name here, appendOrCreateDailyInvoice
-    // has nothing to group same-day submissions by.
-    if (!matchedSupplier) {
-      const pendingSupplier = await readJSON('pendingSupplierConfirm.json', {});
-      pendingSupplier[chatId] = { result, fileId: largest.file_id, submittedByLabel, timestamp: new Date().toISOString() };
-      await writeJSON('pendingSupplierConfirm.json', pendingSupplier);
-      await reply(chatId, result.supplier
-        ? `⚠️ Не впізнав постачальника на фото: "${result.supplier}".\n\n` +
-          `Якщо назва правильна — напишіть "так". Якщо ні — напишіть правильну назву постачальника.`
-        : `⚠️ Не визначив постачальника на фото (наприклад, чек без назви). Напишіть, будь ласка, назву постачальника (наприклад: Фортуна).`);
-      return res.sendStatus(200);
-    }
-
-    await finalizeInvoiceCreation(chatId, matchedSupplier ? matchedSupplier.name : (result.supplier || ''), result, largest.file_id, submittedByLabel, recipients);
+    await processInvoicePhoto(chatId, largest.file_id, result, submittedByLabel, recipients);
     res.sendStatus(200);
   } catch (err) {
     console.error('Telegram webhook error:', err);

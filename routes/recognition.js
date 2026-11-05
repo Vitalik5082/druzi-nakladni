@@ -413,13 +413,20 @@ async function recognizeReceiptImage(imageBase64, mimeType) {
       content: [
         {
           type: "text",
-          text: `Extract payment confirmation data from this receipt/квитанція (bank transfer receipt, cash receipt, or similar) image.
-Also look at the "Призначення платежу" (payment purpose) field, if present — Ukrainian bank transfer
-receipts commonly reference the original накладна/рахунок there, e.g. "Оплата за накладною №123 від
+          text: `First, determine what kind of document this image shows:
+- "receipt" — a payment confirmation: a bank transfer receipt, POS/cash receipt, or similar proof that money was PAID. It shows a payment amount and usually a date, a recipient/payee, and sometimes a "Призначення платежу" (payment purpose) line.
+- "invoice" — a накладна / товарна накладна / рахунок-фактура: a goods delivery document with a supplier name and an itemized list of products with quantities and prices. It does NOT confirm that a payment was made.
+- "other" — neither of the above.
+
+Only if documentType is "receipt", also extract payment confirmation data. Also look at the
+"Призначення платежу" (payment purpose) field, if present — Ukrainian bank transfer receipts
+commonly reference the original накладна/рахунок there, e.g. "Оплата за накладною №123 від
 01.11.2026" or "Рахунок-фактура № РН-45". Extract that referenced document number exactly as printed
 (including any letters/dashes), or empty string if no such reference is visible.
+If documentType is "invoice" or "other", leave amount at 0 and date/recipient/invoiceNumber as empty
+strings — do not try to extract payment fields from a non-receipt document.
 Return ONLY a valid JSON object, no markdown, no explanation.
-Format: { "amount": number (the paid amount, 0 if not visible), "date": "YYYY-MM-DD or empty string if not visible", "recipient": "name of the recipient/payee (supplier/company being paid), or empty string if not visible", "invoiceNumber": "накладна/рахунок number referenced in the payment purpose, or empty string if none" }`
+Format: { "documentType": "receipt" | "invoice" | "other", "amount": number (the paid amount, 0 if not visible or not a receipt), "date": "YYYY-MM-DD or empty string if not visible", "recipient": "name of the recipient/payee (supplier/company being paid), or empty string if not visible", "invoiceNumber": "накладна/рахунок number referenced in the payment purpose, or empty string if none" }`
         },
         { type: "image_url", image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: "high" } }
       ]
@@ -438,6 +445,7 @@ Format: { "amount": number (the paid amount, 0 if not visible), "date": "YYYY-MM
   }
 
   return {
+    documentType: ['receipt', 'invoice', 'other'].includes(parsed.documentType) ? parsed.documentType : 'receipt',
     amount: Number(parsed.amount) || 0,
     date: (parsed.date || '').trim(),
     recipient: (parsed.recipient || '').trim(),
