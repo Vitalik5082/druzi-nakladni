@@ -36,6 +36,7 @@ async function sendTelegram(chatId, text) {
 async function main() {
   const recipients = await readJSON('telegramRecipients.json', []);
   const supplierRecipients = recipients.filter(r => r.role === 'supplier' && r.supplierId);
+  const adminRecipients = recipients.filter(r => r.role === 'admin');
 
   if (!supplierRecipients.length) {
     console.log('Немає зареєстрованих постачальників (role: "supplier") — дайджест не надіслано.');
@@ -74,6 +75,19 @@ async function main() {
       console.log('Digest sent to', recipient.name);
     } catch (err) {
       console.error('Failed to send digest to', recipient.name, err.message);
+      continue;
+    }
+
+    // Admin asked to see a copy of every message a supplier gets from the bot, so he knows what and
+    // when was sent, without having to ask the supplier or check manually.
+    const sentAt = new Date().toLocaleString('uk-UA', { timeZone: 'Europe/Kyiv', hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
+    const forwarded = [`↗️ Копія: надіслано <b>${recipient.name}</b> (${sentAt})`, '', ...lines].join('\n');
+    for (const admin of adminRecipients) {
+      try {
+        await sendTelegram(admin.chatId, forwarded);
+      } catch (err) {
+        console.error('Failed to forward digest copy to', admin.name, err.message);
+      }
     }
   }
 }
