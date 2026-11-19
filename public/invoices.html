@@ -225,38 +225,33 @@
 
 <!-- NEW INVOICE MODAL -->
 <div class="modal-overlay" id="newInvoiceModal">
-  <div class="modal" style="max-width:720px">
+  <div class="modal" style="max-width:480px">
     <div class="modal-title">Нова накладна</div>
-    <div class="modal-sub">Створи накладну вручну — наприклад, якщо немає фото, або AI не впорався</div>
+    <div class="modal-sub">Номер, постачальник і сума — без розбору по позиціях. Прихід у Poster проводиться вручну, в самому Poster.</div>
     <div class="form-grid">
       <div class="form-field">
         <label for="newInvSupplier">Постачальник</label>
-        <select id="newInvSupplier" class="supplier-select" onchange="updateNewInvoicePriceLabel()"></select>
+        <select id="newInvSupplier" class="supplier-select"></select>
       </div>
       <div class="form-field">
         <label for="newInvDate">Дата</label>
         <input id="newInvDate" type="date">
       </div>
     </div>
-
-    <div class="table-wrap" style="margin-top:10px">
-      <table class="mobile-cards-table">
-        <thead>
-          <tr>
-            <th>Товар</th>
-            <th style="text-align:right">К-сть</th>
-            <th>Од.</th>
-            <th style="text-align:right" id="newInvPriceLabel">Ціна (без ПДВ)</th>
-            <th title="Не продуктовий товар — не враховується у собівартість товарів, але віднімається з прибутку як витрата">Хімія</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody id="newInvoiceItemsBody"></tbody>
-      </table>
-      <button class="btn sm" style="margin-top:10px" onclick="addNewInvoiceItemRow()">+ Додати позицію</button>
+    <div class="form-field">
+      <label for="newInvNumber">Номер накладної</label>
+      <input id="newInvNumber" placeholder="напр. РН-0000123 (необов'язково)">
     </div>
-
-    <datalist id="productsDatalist"></datalist>
+    <div class="form-grid">
+      <div class="form-field">
+        <label for="newInvTotal">Сума (без ПДВ)</label>
+        <input id="newInvTotal" type="number" step="any" oninput="syncNewInvoiceVat('net')">
+      </div>
+      <div class="form-field">
+        <label for="newInvTotalVat">Сума (з ПДВ)</label>
+        <input id="newInvTotalVat" type="number" step="any" oninput="syncNewInvoiceVat('gross')">
+      </div>
+    </div>
 
     <div class="modal-footer">
       <button class="btn" onclick="closeNewInvoiceModal()">Скасувати</button>
@@ -408,7 +403,7 @@ function renderInvoiceRow(inv) {
       <div class="inv-meta">
         <span class="inv-chevron" style="display:inline-block;transition:transform .15s;color:var(--text3)">▸</span>
         <span>${inv.date}${inv.number ? ' №' + escHtml(inv.number) : ''}</span>
-        <span>${inv.items.filter(i=>!i.skipped).length} позицій</span>
+        ${inv.items.length ? `<span>${inv.items.filter(i=>!i.skipped).length} позицій</span>` : ''}
         <select class="supplier-select" onclick="event.stopPropagation()" onchange="event.stopPropagation(); changeInvoiceSupplier(${inv.id}, this.value)"
           style="${inv.supplier ? '' : 'border-color:var(--danger);color:var(--danger)'}">
           <option value="">— без постачальника —</option>
@@ -416,19 +411,24 @@ function renderInvoiceRow(inv) {
         </select>
       </div>
       <div class="inv-meta">
-        <span class="total-cell">${(inv.total||0).toFixed(2)} ₴ <span style="color:var(--text3);font-weight:400">(з ПДВ ${(inv.total_with_vat || inv.total*1.2).toFixed(2)} ₴)</span></span>
+        <span class="total-cell"${inv.items.length ? '' : ` style="cursor:pointer" onclick="event.stopPropagation(); startEditInvoiceTotal(${inv.id}, this)" title="Натисніть, щоб відредагувати суму"`}>${(inv.total||0).toFixed(2)} ₴ <span style="color:var(--text3);font-weight:400">(з ПДВ ${(inv.total_with_vat || inv.total*1.2).toFixed(2)} ₴)</span></span>
         ${inv.pendingReview ? `<span class="status-badge unpaid" title="Надіслано ${escHtml(inv.submittedBy || '')} через Telegram-бот">⏳ На перевірці (бот)</span>` : ''}
         <span class="status-badge ${inv.status}">${statusLabel(inv.status)}</span>
         ${inv.pendingReview ? `<button class="btn sm primary confirm-btn" onclick="event.stopPropagation(); confirmReview(${inv.id})">✓ Підтвердити</button>` : ''}
         <button class="btn sm" onclick="event.stopPropagation(); openPayModal(${inv.id})">Оплата</button>
-        ${isEditing
+        ${inv.items.length ? (isEditing
           ? `<button class="btn sm primary" onclick="event.stopPropagation(); saveInvoiceItems(${inv.id})">💾 Зберегти</button>
              <button class="btn sm" onclick="event.stopPropagation(); cancelEditItems(${inv.id})">Скасувати</button>`
-          : `<button class="btn sm" onclick="event.stopPropagation(); editInvoiceItems(${inv.id})">✏️ Редагувати</button>`}
+          : `<button class="btn sm" onclick="event.stopPropagation(); editInvoiceItems(${inv.id})">✏️ Редагувати</button>`) : ''}
         <button class="btn sm danger" onclick="event.stopPropagation(); deleteInvoice(${inv.id})">✕</button>
       </div>
     </div>
     <div class="inv-items">
+      ${!inv.items.length ? `
+      <div style="padding:4px 0;color:var(--text3);font-size:12px">
+        Накладна без розбору по позиціях — прихід у Poster проводиться вручну, в самому Poster.
+        Клацніть по сумі вище, щоб її виправити.
+      </div>` : `
       <div class="table-wrap">
         <table class="mobile-cards-table">
           <thead>
@@ -478,7 +478,7 @@ function renderInvoiceRow(inv) {
           </tbody>
         </table>
         ${isEditing ? `<button class="btn sm" style="margin-top:10px" onclick="event.stopPropagation(); addItemRow(${inv.id})">+ Додати позицію</button>` : ''}
-      </div>
+      </div>`}
     </div>
   </div>`;
 }
@@ -667,6 +667,50 @@ async function saveTotalWithVat(invId, itemId, rawValue, cellEl, previousDisplay
   }
 }
 
+// Header-only накладна (no items) — inline-edit the net total directly, same click-to-edit pattern
+// as startEditTotalWithVat above but at the invoice level since there's no item row to solve the
+// price backwards from.
+function startEditInvoiceTotal(invId, cellEl) {
+  if (cellEl.querySelector('input')) return;
+  const inv = invoices.find(i => i.id === invId);
+  if (!inv) return;
+
+  const current = (inv.total || 0).toFixed(2);
+  cellEl.innerHTML = `<input type="number" step="any" class="price-input" style="width:100px;text-align:right" value="${current}">`;
+  const input = cellEl.querySelector('input');
+  input.focus();
+  input.select();
+
+  const finish = () => saveInvoiceTotal(invId, input.value, cellEl, current);
+  input.addEventListener('blur', finish, { once: true });
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') input.blur();
+    if (e.key === 'Escape') { input.removeEventListener('blur', finish); render(); }
+  });
+}
+
+async function saveInvoiceTotal(invId, rawValue, cellEl, previousDisplay) {
+  const newTotal = parseFloat(rawValue);
+  if (isNaN(newTotal) || newTotal < 0) { render(); return; }
+
+  try {
+    const res = await authFetch(`/api/invoices/${invId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ total: newTotal, totalWithVat: Number((newTotal * 1.2).toFixed(2)) })
+    });
+    if (!res.ok) throw new Error();
+    const updated = await res.json();
+    const inv = invoices.find(i => i.id === invId);
+    if (inv) Object.assign(inv, updated);
+    render();
+    showToast('✓ Суму оновлено', 'success');
+  } catch {
+    showToast('Помилка збереження', 'error');
+    render();
+  }
+}
+
 async function toggleItemChemistry(invId, itemId, checked) {
   const inv = invoices.find(i => i.id === invId);
   if (!inv) return;
@@ -688,37 +732,19 @@ async function toggleItemChemistry(invId, itemId, checked) {
 }
 
 // ── NEW INVOICE MODAL (manual entry — no photo/OCR) ──────────────────
-let nextNewInvoiceRowId = 1;
-
-function updateNewInvoicePriceLabel() {
-  const supplierName = document.getElementById('newInvSupplier').value;
-  const supplier = allSuppliers.find(s => s.name === supplierName);
-  document.getElementById('newInvPriceLabel').textContent = supplier && supplier.pricesIncludeVat ? 'Ціна (з ПДВ)' : 'Ціна (без ПДВ)';
-}
-
-function addNewInvoiceItemRow() {
-  const tbody = document.getElementById('newInvoiceItemsBody');
-  const id = nextNewInvoiceRowId++;
-  const tr = document.createElement('tr');
-  tr.dataset.rowId = id;
-  tr.innerHTML = `
-    <td><input type="text" class="item-name-input modal-search" list="productsDatalist" style="margin:0;width:220px" placeholder="Назва товару"></td>
-    <td style="text-align:right" data-label="К-сть"><input type="number" step="any" class="item-qty-input" style="width:80px;text-align:right" value="0"></td>
-    <td data-label="Од.">
-      <select class="item-unit-select unit-select">
-        <option value="pcs">шт</option>
-        <option value="kg">кг</option>
-        <option value="g">г</option>
-        <option value="l">л</option>
-        <option value="ml">мл</option>
-        <option value="portion">порц</option>
-      </select>
-    </td>
-    <td style="text-align:right" data-label="Ціна"><input type="number" step="any" class="item-price-input" style="width:90px;text-align:right" value="0"></td>
-    <td style="text-align:center" data-label="Хімія"><input type="checkbox" class="item-chem-check"></td>
-    <td><button class="btn sm danger" onclick="this.closest('tr').remove()" title="Видалити позицію">✕</button></td>
-  `;
-  tbody.appendChild(tr);
+// Keeps "Сума (без ПДВ)"/"Сума (з ПДВ)" in sync as whichever one the admin is actually typing
+// into — a plain ×1.2/÷1.2, editable either way since some накладні only ever show one of the two
+// printed on paper.
+function syncNewInvoiceVat(from) {
+  const net = document.getElementById('newInvTotal');
+  const gross = document.getElementById('newInvTotalVat');
+  if (from === 'net') {
+    const v = parseFloat(net.value) || 0;
+    gross.value = v > 0 ? (v * 1.2).toFixed(2) : '';
+  } else {
+    const v = parseFloat(gross.value) || 0;
+    net.value = v > 0 ? (v / 1.2).toFixed(2) : '';
+  }
 }
 
 function openNewInvoiceModal() {
@@ -726,11 +752,9 @@ function openNewInvoiceModal() {
     `<option value="">— без постачальника —</option>` +
     allSuppliers.map(s => `<option value="${escAttr(s.name)}">${escHtml(s.name)}</option>`).join('');
   document.getElementById('newInvDate').value = new Date().toISOString().slice(0, 10);
-  document.getElementById('productsDatalist').innerHTML =
-    allProducts.map(p => `<option value="${escAttr(p)}">`).join('');
-  document.getElementById('newInvoiceItemsBody').innerHTML = '';
-  updateNewInvoicePriceLabel();
-  addNewInvoiceItemRow();
+  document.getElementById('newInvNumber').value = '';
+  document.getElementById('newInvTotal').value = '';
+  document.getElementById('newInvTotalVat').value = '';
   document.getElementById('newInvoiceModal').classList.add('open');
 }
 
@@ -741,39 +765,17 @@ function closeNewInvoiceModal() {
 async function saveNewInvoice(force) {
   const supplier = document.getElementById('newInvSupplier').value;
   const date = document.getElementById('newInvDate').value;
+  const number = document.getElementById('newInvNumber').value.trim();
+  const total = parseFloat(document.getElementById('newInvTotal').value) || 0;
+  const totalWithVat = parseFloat(document.getElementById('newInvTotalVat').value) || total;
   if (!date) { showToast('Вкажи дату', 'error'); return; }
-
-  const rows = document.querySelectorAll('#newInvoiceItemsBody tr[data-row-id]');
-  const items = [];
-  rows.forEach((row, idx) => {
-    const name = row.querySelector('.item-name-input').value.trim();
-    const qty = parseFloat(row.querySelector('.item-qty-input').value) || 0;
-    if (!name || qty <= 0) return;
-    const unit = row.querySelector('.item-unit-select').value;
-    const price = parseFloat(row.querySelector('.item-price-input').value) || 0;
-    const isChemistry = row.querySelector('.item-chem-check').checked;
-    const matched = allProducts.some(p => p.toLowerCase() === name.toLowerCase());
-    items.push({
-      id: idx, name, original_name: name, qty, unit, price,
-      total: Number((qty * price).toFixed(2)),
-      matched, isNewProduct: !matched, skipped: false, isChemistry
-    });
-  });
-
-  if (!items.length) { showToast('Додай хоча б одну позицію (назва і кількість > 0)', 'error'); return; }
-
-  if (!force) {
-    const newProducts = items.filter(i => i.isNewProduct).map(i => i.name);
-    if (newProducts.length && !confirm(
-      `Цих товарів немає в довіднику — вони додадуться як нові:\n${newProducts.join(', ')}\n\nПродовжити?`
-    )) return;
-  }
+  if (!(total > 0)) { showToast('Вкажи суму', 'error'); return; }
 
   try {
     const res = await authFetch('/api/invoices', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ supplier, date, items, source: 'manual', force: !!force })
+      body: JSON.stringify({ supplier, date, number, total, totalWithVat, source: 'manual', force: !!force })
     });
     const data = await res.json();
     if (res.status === 409) {

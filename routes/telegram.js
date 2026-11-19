@@ -10,7 +10,7 @@ const path = require('path');
 const { readJSON, writeJSON, nextId } = require('../lib/store');
 const { normalize, findSupplier, includesWord } = require('../lib/convert');
 const { localDateStr, posterCall } = require('../lib/poster');
-const { recognizeInvoiceImage, recognizeReceiptImage, recognizeStockText, recognizeExpenseText } = require('./recognition');
+const { recognizeInvoiceSummary, recognizeReceiptImage, recognizeStockText, recognizeExpenseText } = require('./recognition');
 const { createInvoice, updateInvoice } = require('./invoices');
 const { createExpenseRecord } = require('./expenses');
 
@@ -278,11 +278,15 @@ async function handlePaymentText(chatId, amount) {
 }
 
 // Shared tail of накладна creation (used both when the supplier was recognized immediately, and
-// after a waiter resolves an unrecognized-supplier prompt) — creates the накладна, replies to the
-// sender, asks payment status, and forwards the photo + AI self-check warning to admin/бухгалтер.
+// after a waiter resolves an unrecognized-supplier prompt) — creates the header-only накладна
+// (number/supplier/date/total, no items — see recognizeInvoiceSummary), replies to the sender,
+// asks payment status, and forwards the photo to admin always + бухгалтер only for suppliers she
+// actually handles payments for (supplier.notifiesAccountant). Admin/Віталій push Poster приход
+// by hand now — this bot flow no longer touches Poster at all.
 async function finalizeInvoiceCreation(chatId, supplierName, result, fileId, submittedByLabel, recipients) {
   const outcome = await appendOrCreateDailyInvoice({
-    supplierName, date: result.date, items: result.items, source: 'telegram', submittedBy: submittedByLabel, number: result.number
+    supplierName, date: result.date, total: result.total, totalWithVat: result.totalWithVat,
+    source: 'telegram', submittedBy: submittedByLabel, number: result.number
   });
 
   if (!outcome.appended && outcome.created.duplicate) {
@@ -295,34 +299,27 @@ async function finalizeInvoiceCreation(chatId, supplierName, result, fileId, sub
   const inv = outcome.appended ? outcome.invoice : outcome.created.invoice;
   const grossTotal = inv.total_with_vat || inv.total * 1.2;
 
-  // Unrecognized items aren't resolved here in chat (that needs a full product search, which this
-  // bot's text interface can't offer well) — flag them to the sender so it's not a silent gap, and
-  // point at the website's own popup (invoices.html auto-prompts "перейменувати/додати новим" the
-  // moment this накладна is opened there).
-  const newItems = result.items.filter(i => i.isNewProduct && !i.skipped);
-  const newItemsNote = newItems.length
-    ? `\n\n❓ ${newItems.length === 1 ? 'Позиція' : 'Позиції'} не знайдена в довіднику Poster: ${newItems.map(i => i.name).join(', ')}. ` +
-      `Адмін перейменує або підтвердить додавання на сайті.`
-    : '';
-
   if (outcome.appended) {
     await reply(chatId,
-      `✅ Додано до накладної Фортуни за ${inv.date} (тепер ${inv.items.filter(i => !i.skipped).length} позицій)!\n` +
-      `Сума до сплати (з ПДВ): ${grossTotal.toFixed(2)} ₴${newItemsNote}`);
+      `✅ Додано до накладної Фортуни за ${inv.date}!\nСума до сплати (з ПДВ): ${grossTotal.toFixed(2)} ₴`);
   } else {
     await reply(chatId,
-      `✅ Накладну додано на перевірку!\nПостачальник: ${inv.supplier}\nДата: ${inv.date}\n` +
-      `Сума до сплати (з ПДВ): ${grossTotal.toFixed(2)} ₴${result.warning ? '\n\n⚠️ ' + result.warning : ''}${newItemsNote}`);
+      `✅ Накладну додано!\nПостачальник: ${inv.supplier}\nДата: ${inv.date}${inv.number ? ` (№${inv.number})` : ''}\n` +
+      `Сума до сплати (з ПДВ): ${grossTotal.toFixed(2)} ₴\n\nПрихід у Poster потрібно провести вручну.`);
   }
 
   await askPaymentStatus(chatId, inv.id);
 
-  // Every накладна goes to admin AND бухгалтер, always — visible sender + status, regardless of
-  // supplier config (previously gated by telegramInvoicesAllowed, which caused silent misses).
-  // Forward the actual photo (by file_id, no re-download), not just the AI-extracted text — the
-  // бухгалтер needs to see the real document, not a summary, especially to double-check the AI.
+  // Admin always gets every накладна (unchanged). Бухгалтер only gets накладні from suppliers she
+  // actually tracks payments for (suppliers.json's telegramInvoicesAllowed flag — the same
+  // "Автопересилка бухгалтеру" checkbox on public/suppliers.html, previously unused dead state
+  // after an earlier refactor made every накладна go to her regardless of supplier).
+  const suppliers = await readJSON('suppliers.json', []);
+  const supplierRecord = findSupplier(suppliers, inv.supplier);
+  const notifyAccountant = !!(supplierRecord && supplierRecord.telegramInvoicesAllowed);
   const toNotify = recipients.filter(r =>
-    String(r.chatId) !== chatId && ['admin', 'accountant'].includes(r.role));
+    String(r.chatId) !== chatId &&
+    (r.role === 'admin' || (r.role === 'accountant' && notifyAccountant)));
 
   for (const r of toNotify) {
     try {
@@ -332,11 +329,9 @@ async function finalizeInvoiceCreation(chatId, supplierName, result, fileId, sub
         caption: (outcome.appended
           ? `🧾 Чек Фортуни від ${submittedByLabel} додано до накладної за ${inv.date}:\n`
           : `🧾 Нова накладна від ${submittedByLabel} (через бот):\n`) +
-          `Постачальник: ${inv.supplier}\nДата: ${inv.date}\nСума до сплати (з ПДВ): ${grossTotal.toFixed(2)} ₴\n` +
-          `Статус: на перевірці.\nПеревірте на сайті в розділі "Накладні".` +
-          // Previously shown only to the waiter who sent the photo (who can't act on it) — admin/
-          // бухгалтер, who actually review накладні, never saw this AI self-check mismatch at all.
-          (result.warning ? `\n\n⚠️ ${result.warning}` : '') + newItemsNote
+          `Постачальник: ${inv.supplier}\nДата: ${inv.date}${inv.number ? ` (№${inv.number})` : ''}\n` +
+          `Сума до сплати (з ПДВ): ${grossTotal.toFixed(2)} ₴\n` +
+          `Перевірте на сайті в розділі "Накладні". Прихід у Poster — вручну.`
       });
     } catch (e) { console.error('Invoice photo forward failed:', e); }
   }
@@ -344,7 +339,7 @@ async function finalizeInvoiceCreation(chatId, supplierName, result, fileId, sub
 
 // Shared by the normal накладна photo flow (admin/waiter/supplier) and handleReceiptPhoto's
 // redirect when a бухгалтер's photo turns out to be a накладна, not a чек — takes an already
-// OCR'd recognizeInvoiceImage result and does supplier matching + pendingReview creation, so both
+// OCR'd recognizeInvoiceSummary result and does supplier matching + накладна creation, so both
 // callers get identical behaviour instead of a second, drifting copy of this logic.
 async function processInvoicePhoto(chatId, fileId, result, submittedByLabel, recipients) {
   if (result.documentType === 'zreport') {
@@ -386,7 +381,7 @@ async function handleReceiptPhoto(chatId, base64, fileId, submittedByLabel, reci
   // itself flags this case instead of a separate classification call.
   if (result.documentType === 'invoice') {
     await reply(chatId, '📄 Це схоже на накладну, а не чек — розпізнаю як накладну...');
-    const invoiceResult = await recognizeInvoiceImage(base64, 'image/jpeg');
+    const invoiceResult = await recognizeInvoiceSummary(base64, 'image/jpeg');
     await processInvoicePhoto(chatId, fileId, invoiceResult, submittedByLabel, recipients);
     return;
   }
@@ -529,23 +524,17 @@ function unitLabel(u) { return UNIT_DISPLAY[u] || u; }
 // reported one at a time in a day = 10 накладні) instead of one накладна per day listing them all.
 function isFortunaSupplier(name) { return (name || '').toLowerCase().includes('фортуна'); }
 
-// ОлегКруасан (bread/buns) text-прихід reports are simple and reliable enough (almost always one
-// item, e.g. "булочок 56 шт") that the user wants them pushed into Poster stock immediately instead
-// of sitting pendingReview until someone opens the реєстр накладних and clicks "✓ Підтвердити" -
-// unlike every other text-прихід supplier, where a human should eyeball the AI-matched items first
-// before they hit real stock/cost. A накладна from this supplier (2026-10-24, 56 Булочка Бріош)
-// sat unreviewed for 5 days and never reached Poster's залишки until confirmed by hand - this is
-// the fix so it doesn't happen again for this specific supplier.
-function isOlegCroissantSupplier(name) { return (name || '').toLowerCase().includes('олегкруасан'); }
-
-// Shared by finalizeInvoiceCreation (photo чек) and handleStockAmountReply (text прихід) — once the
-// supplier is known to be Фортуна, append newItems to today's still-pendingReview Фортуна накладна
-// instead of creating a new one; any other supplier keeps the old one-document-per-submission
-// behaviour untouched.
-async function appendOrCreateDailyInvoice({ supplierName, date, items, source, submittedBy, number }) {
+// Shared by finalizeInvoiceCreation (photo накладна — header-only total, no items) and
+// handleStockAmountReply (text прихід — item-matched qty) — once the supplier is known to be
+// Фортуна, append to today's still-pendingReview Фортуна накладна instead of creating a new one;
+// any other supplier keeps the old one-document-per-submission behaviour. Accepts either `items`
+// (merged into one array, as before) or a direct `total`/`totalWithVat` (summed as plain numbers),
+// depending on which caller is using it. pendingReview is always true for a bot-created накладна —
+// it's just an admin-looked-at-it flag now (no Poster push left to gate; Poster приход is entered
+// by hand).
+async function appendOrCreateDailyInvoice({ supplierName, date, items, total, totalWithVat, source, submittedBy, number }) {
   if (!isFortunaSupplier(supplierName)) {
-    const autoConfirm = isOlegCroissantSupplier(supplierName);
-    return { appended: false, created: await createInvoice({ supplier: supplierName, date, items, source, submittedBy, pendingReview: !autoConfirm, number }) };
+    return { appended: false, created: await createInvoice({ supplier: supplierName, date, items, total, totalWithVat, source, submittedBy, pendingReview: true, number }) };
   }
 
   const invoices = await readJSON(FILE, []);
@@ -553,15 +542,22 @@ async function appendOrCreateDailyInvoice({ supplierName, date, items, source, s
     inv.date === date && isFortunaSupplier(inv.supplier) && inv.pendingReview === true);
 
   if (!existing) {
-    return { appended: false, created: await createInvoice({ supplier: supplierName, date, items, source, submittedBy, pendingReview: true, number }) };
+    return { appended: false, created: await createInvoice({ supplier: supplierName, date, items, total, totalWithVat, source, submittedBy, pendingReview: true, number }) };
   }
 
-  // Fresh ids continuing past whatever's already on the invoice — the website's edit/match-modal
-  // UI keys each row by item.id, so a collision with an existing item would corrupt that row.
-  const maxId = existing.items.reduce((m, i) => Math.max(m, Number(i.id) || 0), -1);
-  const newItems = items.map((item, idx) => ({ ...item, id: maxId + 1 + idx }));
-  const updated = await updateInvoice(existing.id, { items: [...existing.items, ...newItems] });
-  return { appended: true, invoice: updated, addedItems: newItems };
+  if (Array.isArray(items)) {
+    // Fresh ids continuing past whatever's already on the invoice — the website's edit/match-modal
+    // UI keys each row by item.id, so a collision with an existing item would corrupt that row.
+    const maxId = existing.items.reduce((m, i) => Math.max(m, Number(i.id) || 0), -1);
+    const newItems = items.map((item, idx) => ({ ...item, id: maxId + 1 + idx }));
+    const updated = await updateInvoice(existing.id, { items: [...existing.items, ...newItems] });
+    return { appended: true, invoice: updated, addedItems: newItems };
+  }
+
+  const newTotal = Number(((existing.total || 0) + (Number(total) || 0)).toFixed(2));
+  const newTotalWithVat = Number(((existing.total_with_vat || 0) + (Number(totalWithVat) || 0)).toFixed(2));
+  const updated = await updateInvoice(existing.id, { total: newTotal, totalWithVat: newTotalWithVat });
+  return { appended: true, invoice: updated };
 }
 
 // Free-text goods-receipt report from a waiter ("Круасан 8 шт, Булочки 50шт") — no fixed format,
@@ -683,13 +679,9 @@ async function handleStockAmountReply(chatId, text, pendingEntry, recipients) {
   }
   const inv = outcome.appended ? outcome.invoice : outcome.created.invoice;
 
-  // No Poster push here for most suppliers — the накладна is pendingReview:true (set inside
-  // appendOrCreateDailyInvoice/createInvoice), same as any OCR'd накладна from a photo. It only
-  // reaches Poster once an admin reviews and confirms it from the реєстр накладних
-  // (routes/invoices.js's updateInvoice() does the push, triggered by pendingReview flipping to
-  // false), exactly like the photo-OCR flow. Nobody but the waiter has looked at this yet — pushing
-  // it into Poster's real stock/cost immediately, before any review, was the original design flaw -
-  // except ОлегКруасан (see isOlegCroissantSupplier), which skips the review gate on purpose.
+  // No Poster push happens here at all anymore — Poster приход is entered by hand now (see
+  // CLAUDE.md). The накладна is created pendingReview:true same as any bot накладна; "✓
+  // Підтвердити" on the реєстр is just an admin-looked-at-it flag with no side effect.
   const log = await readJSON('textSupplies.json', []);
   log.push({
     id: nextId(log), date: localDateStr(), timestamp: new Date().toISOString(), submittedBy,
@@ -1038,7 +1030,7 @@ router.post('/telegram/webhook', async (req, res) => {
     }
 
     await reply(chatId, '📷 Отримав, розпізнаю накладну...');
-    const result = await recognizeInvoiceImage(base64, 'image/jpeg');
+    const result = await recognizeInvoiceSummary(base64, 'image/jpeg');
     await processInvoicePhoto(chatId, largest.file_id, result, submittedByLabel, recipients);
     res.sendStatus(200);
   } catch (err) {

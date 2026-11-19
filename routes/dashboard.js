@@ -1,5 +1,6 @@
 const express = require('express');
 const { readJSON } = require('../lib/store');
+const { findSupplier } = require('../lib/convert');
 
 const router = express.Router();
 
@@ -7,14 +8,15 @@ router.get('/dashboard', async (req, res) => {
   const { from, to } = req.query;
   if (!from || !to) return res.status(400).json({ error: 'from and to required' });
 
-  const [cashDaysAll, invoicesAll, expensesAll, payrollAll, posterFinance, employees, posterSales] = await Promise.all([
+  const [cashDaysAll, invoicesAll, expensesAll, payrollAll, posterFinance, employees, posterSales, suppliers] = await Promise.all([
     readJSON('cashdays.json', []),
     readJSON('invoices.json', []),
     readJSON('expenses.json', []),
     readJSON('payroll.json', []),
     readJSON('posterFinance.json', {}),
     readJSON('employees.json', []),
-    readJSON('posterSales.json', {})
+    readJSON('posterSales.json', {}),
+    readJSON('suppliers.json', [])
   ]);
 
   const cashDays = cashDaysAll.filter(d => d.date >= from && d.date <= to);
@@ -50,16 +52,25 @@ router.get('/dashboard', async (req, res) => {
 
   const revenue = cashDays.reduce((s, d) => s + (d.revenue || 0), 0);
 
-  // "Хімія" items (cleaning supplies, packaging, batteries, small repairs etc.) tagged inside a
-  // накладна aren't food/drink goods — they shouldn't count toward the product-purchase total or
-  // COGS, but they ARE a real expense that reduces profit. Split them out of "goods" here instead
-  // of using invoice.total directly, which would still lump them in.
+  // "Хімія" items (cleaning supplies, packaging, batteries, small repairs etc.) aren't food/drink
+  // goods — they shouldn't count toward the product-purchase total or COGS, but they ARE a real
+  // expense that reduces profit. Old item-based накладні keep the exact per-item split
+  // (item.isChemistry, set by the "Нова накладна" item-row checkbox or the OCR pipeline's
+  // chemistry-supplier lump-sum item). Накладні created via the simplified bot flow have no items
+  // at all anymore (just a header total) — for those, fall back to the накладна's own supplier
+  // flag (suppliers.json's isChemistrySupplier).
   let goods = 0, chemistryCost = 0;
   for (const inv of invoices) {
-    for (const item of inv.items || []) {
-      if (item.skipped) continue;
-      if (item.isChemistry) chemistryCost += item.total || 0;
-      else goods += item.total || 0;
+    if (inv.items && inv.items.length) {
+      for (const item of inv.items) {
+        if (item.skipped) continue;
+        if (item.isChemistry) chemistryCost += item.total || 0;
+        else goods += item.total || 0;
+      }
+    } else {
+      const supplierRecord = findSupplier(suppliers, inv.supplier);
+      if (supplierRecord && supplierRecord.isChemistrySupplier) chemistryCost += inv.total || 0;
+      else goods += inv.total || 0;
     }
   }
   chemistryCost = Number(chemistryCost.toFixed(2));

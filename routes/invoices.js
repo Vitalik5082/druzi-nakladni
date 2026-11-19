@@ -1,7 +1,7 @@
 const express = require('express');
 const { readJSON, writeJSON, nextId } = require('../lib/store');
 const { normalize, VAT_RATE } = require('../lib/convert');
-const { localDateStr, pushInvoiceToPoster } = require('../lib/poster');
+const { localDateStr } = require('../lib/poster');
 
 const router = express.Router();
 const FILE = 'invoices.json';
@@ -78,8 +78,13 @@ function reverseVatDirection(items) {
 
 // Shared by the website's POST /invoices AND the Telegram bot. Returns either
 // { duplicate: true, existing } or { invoice }.
-async function createInvoice({ supplier, date, items, dueDate, force, source, submittedBy, pendingReview, number }) {
-  if (!Array.isArray(items) || !items.length) {
+// Two shapes: pass `items` (website's item-by-item entry/OCR, public/index.html) and the total is
+// summed from them as before; OR pass a direct `total`/`totalWithVat` with no items (the simplified
+// bot flow and invoices.html's "Нова накладна" — just a header record, no item-level breakdown, no
+// Poster приход push: that's done by hand in Poster now, see CLAUDE.md "Телеграм" section).
+async function createInvoice({ supplier, date, items, total: directTotal, totalWithVat: directTotalWithVat, dueDate, force, source, submittedBy, pendingReview, number }) {
+  const hasItems = Array.isArray(items) && items.length;
+  if (!hasItems && !(Number(directTotal) > 0)) {
     const err = new Error('No items');
     err.status = 400;
     throw err;
@@ -90,11 +95,16 @@ async function createInvoice({ supplier, date, items, dueDate, force, source, su
 
   const suppliersList = await readJSON(SUPPLIERS_FILE, []);
   const supplierRecord = suppliersList.find(s => s.name.toLowerCase() === invoiceSupplier.toLowerCase());
-  if (supplierRecord && supplierRecord.pricesIncludeVat) {
+  if (hasItems && supplierRecord && supplierRecord.pricesIncludeVat) {
     items = reverseVatDirection(items);
   }
 
-  const total = items.filter(i => !i.skipped).reduce((s, i) => s + (i.total || 0), 0);
+  const total = hasItems
+    ? items.filter(i => !i.skipped).reduce((s, i) => s + (i.total || 0), 0)
+    : Number(directTotal) || 0;
+  const totalWithVat = hasItems
+    ? Number((total * VAT_RATE).toFixed(2))
+    : Number(directTotalWithVat) || Number((total * VAT_RATE).toFixed(2));
 
   const invoices = await readJSON(FILE, []);
 
@@ -108,9 +118,9 @@ async function createInvoice({ supplier, date, items, dueDate, force, source, su
     date: invoiceDate,
     supplier: invoiceSupplier,
     number: (number || '').trim() || null,
-    items,
+    items: hasItems ? items : [],
     total,
-    total_with_vat: Number((total * VAT_RATE).toFixed(2)),
+    total_with_vat: totalWithVat,
     paidAmount: 0,
     paidDate: null,
     dueDate: dueDate || null,
@@ -120,25 +130,10 @@ async function createInvoice({ supplier, date, items, dueDate, force, source, su
     createdAt: new Date().toISOString()
   };
 
-  // A накладна that ISN'T pending has already been reviewed by a human before this call ran — the
-  // website flow (photo-OCR or manual entry) only calls createInvoice() once the admin clicks
-  // "Зберегти" after checking/editing the extracted items, so there's no separate approval step to
-  // wait for. A pending one (Telegram OCR, text-прихід) hasn't been looked at by anyone yet — its
-  // push happens later, in updateInvoice(), when pendingReview flips to false via "✓ Підтвердити".
-  if (!invoice.pendingReview) {
-    try {
-      invoice.posterPush = await pushInvoiceToPoster(invoice);
-    } catch (err) {
-      console.error('createInvoice: pushInvoiceToPoster failed:', err);
-      invoice.posterPush = { error: err.message };
-    }
-    invoice.postedToPoster = true;
-  }
-
   invoices.push(invoice);
   await writeJSON(FILE, invoices);
   await ensureSupplier(invoice.supplier);
-  await learnSupplierFromItems(items, invoice.supplier);
+  if (hasItems) await learnSupplierFromItems(items, invoice.supplier);
 
   return { invoice: { ...invoice, status: deriveStatus(invoice) } };
 }
@@ -181,7 +176,7 @@ router.post('/invoices', async (req, res) => {
 });
 
 // Shared by the website's PATCH /invoices/:id AND the Telegram bot's payment-status buttons.
-async function updateInvoice(id, { paidAmount, paidDate, dueDate, supplier, date, pendingReview, items }) {
+async function updateInvoice(id, { paidAmount, paidDate, dueDate, supplier, date, pendingReview, items, total, totalWithVat }) {
   const invoices = await readJSON(FILE, []);
   const invoice = invoices.find(inv => inv.id === Number(id));
   if (!invoice) return null;
@@ -201,8 +196,6 @@ async function updateInvoice(id, { paidAmount, paidDate, dueDate, supplier, date
       vatWarning = `Постачальник "${supplier}" позначений "ціна з ПДВ" — перевірте вручну, чи суми в накладній правильні (можливо, потрібно перерахувати через "Редагувати").`;
     }
   }
-
-  const wasPending = !!invoice.pendingReview;
 
   if (paidAmount !== undefined) invoice.paidAmount = Number(paidAmount) || 0;
   if (paidDate !== undefined) invoice.paidDate = paidDate;
@@ -228,21 +221,15 @@ async function updateInvoice(id, { paidAmount, paidDate, dueDate, supplier, date
     });
     invoice.total = Number(invoice.items.filter(i => !i.skipped).reduce((s, i) => s + (i.total || 0), 0).toFixed(2));
     invoice.total_with_vat = Number((invoice.total * VAT_RATE).toFixed(2));
+  } else if (total !== undefined) {
+    // Header-only накладна (no items) — admin correcting the amount directly in the реєстр.
+    invoice.total = Number(total) || 0;
+    invoice.total_with_vat = totalWithVat !== undefined ? (Number(totalWithVat) || 0) : Number((invoice.total * VAT_RATE).toFixed(2));
   }
 
-  // The накладна just moved from "nobody's looked at it" to "admin clicked ✓ Підтвердити" — this
-  // is the first point a Telegram-sourced (OCR photo / text-прихід) накладна is safe to push into
-  // Poster as a real supply. guarded by postedToPoster so a накладна that's somehow re-confirmed
-  // (or edited again after confirming) never pushes the same items twice.
-  if (wasPending && invoice.pendingReview === false && !invoice.postedToPoster) {
-    try {
-      invoice.posterPush = await pushInvoiceToPoster(invoice);
-    } catch (err) {
-      console.error('updateInvoice: pushInvoiceToPoster failed:', err);
-      invoice.posterPush = { error: err.message };
-    }
-    invoice.postedToPoster = true;
-  }
+  // Poster приход is now entered by hand directly in Poster (no automatic push on confirm) — see
+  // the "накладні" section of CLAUDE.md. pendingReview/"✓ Підтвердити" still exists purely as an
+  // admin-looked-at-it flag, no side effect left to gate.
 
   await writeJSON(FILE, invoices);
   if (supplier) await ensureSupplier(supplier);

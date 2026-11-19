@@ -315,6 +315,91 @@ async function recognizeInvoiceImage(imageBase64, mimeType) {
   return { documentType: 'invoice', items: mapped, count: mapped.length, supplier, date: aiDate, number: aiNumber, warning };
 }
 
+const INVOICE_SUMMARY_PROMPT = `Extract invoice HEADER data from this Ukrainian invoice (накладна) image —
+do NOT read the individual line items, only the document-level fields below.
+
+FIRST check what kind of document this actually is — a waiter sometimes photographs the wrong thing,
+most commonly a cash register's Z-звіт (fiscal end-of-shift report) instead of a supplier's накладна.
+A Z-звіт/X-звіт contains phrases like "Z-звіт", "Фіскальний звіт", "Звіт нульовано", "Фіскальний звіт
+дійсний" — if you see any of those (or it's clearly a cash-register receipt with sales totals, not a
+supplier invoice), set documentType to "zreport".
+
+Return ONLY a valid JSON object, no markdown, no explanation.
+Format: {
+  "documentType": "invoice" | "zreport" | "other",
+  "supplier": "supplier/vendor name as printed on the invoice letterhead, or empty string if not visible",
+  "date": "invoice date in YYYY-MM-DD format, or empty string if not visible",
+  "number": "the накладна's own printed document number (e.g. '№123', 'РН-0000123'), exactly as printed, or empty string if not visible",
+  "total": number (the printed total WITHOUT VAT — look for "без ПДВ"/"Сума"/"Вартість" label; 0 if not printed at all),
+  "totalWithVat": number (the printed total WITH VAT — look for "з ПДВ"/"Разом"/"Всього"/"До сплати" label; 0 if not printed at all)
+}
+
+CRITICAL — read whatever figures are literally printed on the page, do NOT calculate one from the
+other (never multiply/divide by 1.2 yourself). Many invoices print only ONE total figure with no
+net/gross distinction at all — in that case put that exact same number in BOTH "total" and
+"totalWithVat" (do not invent a second number). Only fill both with DIFFERENT numbers when the
+invoice itself explicitly prints two different figures (e.g. a "без ПДВ" line AND a separate "з ПДВ"/
+"Разом" line).`;
+
+// Simplified invoice recognition used by the Telegram bot flow — just the header (who/when/how
+// much), no item-by-item OCR/matching/Poster push. The owner found the old item-level pipeline
+// (recognizeInvoiceImage above, still used by public/index.html's manual "Invoice Processor")
+// unreliable — different suppliers print net/gross totals in incompatible ways, and the hardcoded
+// VAT-direction math kept guessing wrong (Метро, Проценко/Плахотнік). This just reads whatever
+// total figures are literally printed, with no multiply-by-1.2 guessing — see INVOICE_SUMMARY_PROMPT.
+async function recognizeInvoiceSummary(imageBase64, mimeType) {
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o",
+    max_tokens: 500,
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: INVOICE_SUMMARY_PROMPT },
+        { type: "image_url", image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: "high" } }
+      ]
+    }]
+  });
+
+  const rawText = response.choices?.[0]?.message?.content || '';
+  const cleaned = rawText.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+
+  let parsed;
+  try { parsed = JSON.parse(cleaned); }
+  catch (e) {
+    const truncated = response.choices?.[0]?.finish_reason === 'length';
+    const err = new Error(truncated ? 'AI response truncated (hit max_tokens)' : 'AI returned invalid JSON');
+    err.raw = rawText;
+    throw err;
+  }
+
+  if (parsed.documentType === 'zreport') {
+    return { documentType: 'zreport', supplier: '', date: '', number: '', total: 0, totalWithVat: 0 };
+  }
+
+  let total = Number(parsed.total) || 0;
+  let totalWithVat = Number(parsed.totalWithVat) || 0;
+  // Only one of the two printed on the page (the common case) — AI should already mirror it into
+  // both per the prompt, but guard here too in case it only filled one.
+  if (total > 0 && totalWithVat <= 0) totalWithVat = total;
+  if (totalWithVat > 0 && total <= 0) total = totalWithVat;
+
+  let supplier = (parsed.supplier || '').trim();
+  if (supplier) {
+    const suppliers = await readJSON('suppliers.json', []);
+    const matched = findSupplier(suppliers, supplier);
+    if (matched) supplier = matched.name;
+  }
+
+  return {
+    documentType: 'invoice',
+    supplier,
+    date: (parsed.date || '').trim(),
+    number: (parsed.number || '').trim(),
+    total,
+    totalWithVat
+  };
+}
+
 // Free-text stock receipt report ("Круасан 8 шт, Булочки 50шт") — a waiter typing what just got
 // delivered, with no fixed format. Extracts {name, qty, unit} triples; name stays whatever the
 // waiter typed (singular/plural, abbreviated) — matching it against the real Poster ingredient
@@ -564,6 +649,7 @@ router.post('/export', async (req, res) => {
 
 module.exports = router;
 module.exports.recognizeInvoiceImage = recognizeInvoiceImage;
+module.exports.recognizeInvoiceSummary = recognizeInvoiceSummary;
 module.exports.recognizeReceiptImage = recognizeReceiptImage;
 module.exports.recognizeStockText = recognizeStockText;
 module.exports.recognizeExpenseText = recognizeExpenseText;

@@ -1,6 +1,7 @@
 const express = require('express');
 const OpenAI = require('openai');
 const { readJSON } = require('../lib/store');
+const { findSupplier } = require('../lib/convert');
 
 const router = express.Router();
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -258,14 +259,15 @@ async function executeTool(name, args) {
       from = dates[dates.length - 1];
     }
 
-    const [cashDaysAll, invoicesAll, expensesAll, payrollAll, posterFinance, employees, posterSales] = await Promise.all([
+    const [cashDaysAll, invoicesAll, expensesAll, payrollAll, posterFinance, employees, posterSales, suppliers] = await Promise.all([
       readJSON('cashdays.json', []),
       readJSON('invoices.json', []),
       readJSON('expenses.json', []),
       readJSON('payroll.json', []),
       readJSON('posterFinance.json', {}),
       readJSON('employees.json', []),
-      readJSON('posterSales.json', {})
+      readJSON('posterSales.json', {}),
+      readJSON('suppliers.json', [])
     ]);
 
     const cashDays = cashDaysAll.filter(d => d.date >= from && d.date <= to);
@@ -300,10 +302,18 @@ async function executeTool(name, args) {
 
     const revenue = cashDays.reduce((s, d) => s + (d.revenue || 0), 0);
 
+    // Mirror of routes/dashboard.js's chemistryCost split — see its comment for why item-based
+    // накладні use the per-item flag while header-only (bot-created) ones fall back to the
+    // накладна's own supplier flag.
     let chemistryCost = 0;
     for (const inv of invoices) {
-      for (const item of inv.items || []) {
-        if (!item.skipped && item.isChemistry) chemistryCost += item.total || 0;
+      if (inv.items && inv.items.length) {
+        for (const item of inv.items) {
+          if (!item.skipped && item.isChemistry) chemistryCost += item.total || 0;
+        }
+      } else {
+        const supplierRecord = findSupplier(suppliers, inv.supplier);
+        if (supplierRecord && supplierRecord.isChemistrySupplier) chemistryCost += inv.total || 0;
       }
     }
 
