@@ -791,7 +791,7 @@ async function handleAdminExpenseText(chatId, text, recipients) {
     const expenses = await readJSON('expenses.json', []);
     const created = [];
     for (const item of known) {
-      created.push(await createExpenseRecord(expenses, { date, category: item.category, description: 'Через бот (адмін)', amount: item.amount }));
+      created.push(await createExpenseRecord(expenses, { date, category: item.category, description: item.comment || 'Через бот (адмін)', amount: item.amount }));
     }
     await writeJSON('expenses.json', expenses);
 
@@ -806,7 +806,7 @@ async function handleAdminExpenseText(chatId, text, recipients) {
 
   if (unknown.length) {
     const pendingAll = await readJSON('pendingExpenseCategory.json', {});
-    const queue = unknown.map(i => ({ category: i.category, amount: i.amount, date }));
+    const queue = unknown.map(i => ({ category: i.category, amount: i.amount, date, comment: i.comment }));
     pendingAll[chatId] = { queue, timestamp: new Date().toISOString() };
     await writeJSON('pendingExpenseCategory.json', pendingAll);
     await askExpenseCategoryChoice(chatId, queue[0], knownCategories);
@@ -858,7 +858,7 @@ async function handleExpenseCategoryCallback(chatId, messageId, callbackQueryId,
 
     const expenses = await readJSON('expenses.json', []);
     const expense = await createExpenseRecord(expenses, {
-      date: current.date, category: finalCategory, description: 'Через бот (адмін)', amount: current.amount
+      date: current.date, category: finalCategory, description: current.comment || 'Через бот (адмін)', amount: current.amount
     });
     await writeJSON('expenses.json', expenses);
 

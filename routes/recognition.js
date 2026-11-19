@@ -376,8 +376,10 @@ async function recognizeExpenseText(text, categories) {
 Extract every (category, amount) pair you can find. Match each item's category to the CLOSEST one from this
 exact list (use the exact spelling from the list, never invent a new category): ${categories.join(', ')}.
 If an item clearly doesn't match any category in the list, still extract it with your best-guess name.
+If the message includes any extra detail beyond the category and amount (what it was for, a supplier/payee
+name, a period, an invoice number, etc.), put that detail verbatim in "comment"; otherwise leave it empty.
 Return ONLY a valid JSON object, no markdown, no explanation.
-Format: { "items": [ { "category": string, "amount": number } ] }
+Format: { "items": [ { "category": string, "amount": number, "comment": string } ] }
 Message: """${text}"""`
     }]
   });
@@ -396,7 +398,7 @@ Message: """${text}"""`
   const items = Array.isArray(parsed.items) ? parsed.items : [];
   return {
     items: items
-      .map(i => ({ category: (i.category || '').trim(), amount: Number(i.amount) || 0 }))
+      .map(i => ({ category: (i.category || '').trim(), amount: Number(i.amount) || 0, comment: (i.comment || '').trim() }))
       .filter(i => i.category && i.amount > 0)
   };
 }
