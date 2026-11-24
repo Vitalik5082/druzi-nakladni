@@ -33,12 +33,12 @@ async function sendTelegram(chatId, text) {
   if (!data.ok) throw new Error('Telegram: ' + JSON.stringify(data));
 }
 
+// 2026-11-24: the bot no longer records these figures itself (no more free-text reply parsing) —
+// this is now a one-time-per-month nudge only. Юлія reports the numbers to Марина via Viber, and
+// Марина (a registered admin) enters the expense herself (website or the bot's "Витрата: ..." flow).
 function buildMessage(monthLabel) {
   return `Доброго дня! Настав час зафіксувати податки та комуналку за ${monthLabel}.\n\n` +
-    `Якщо податки і комуналка були вже оплачені, надішліть мені будь ласка в форматі ` +
-    `"Податки: 10грн, Комуналка: 10грн". Якщо платежі ще не було оплачено, надішліть, будь ласка, ` +
-    `одразу після оплати. Дякую!\n\n` +
-    `⏰ Комуналку за ${monthLabel}, будь ласка, внесіть до 20-го числа — після цього я нагадуватиму щодня.`;
+    `Будь ласка, напишіть суми Марині у Viber (вона внесе ці витрати) — податки та комуналку за ${monthLabel}. Дякую!`;
 }
 
 // Skips a template already applied this month (same guard /recurring-expenses/apply uses), so
@@ -86,20 +86,16 @@ async function main() {
   if (!accountants.length) {
     console.log('Немає зареєстрованого бухгалтера (role: "accountant") — нагадування не надіслано.');
   } else {
-    const pending = await readJSON('pendingAccountantReport.json', {});
     const text = buildMessage(monthLabel);
 
     for (const r of accountants) {
       try {
         await sendTelegram(r.chatId, text);
-        pending[String(r.chatId)] = { month: targetMonth, timestamp: new Date().toISOString() };
         console.log('Reminder sent to', r.name, 'for month', targetMonth);
       } catch (err) {
         console.error('Failed to send reminder to', r.name, err.message);
       }
     }
-
-    await writeJSON('pendingAccountantReport.json', pending);
   }
 
   const created = await applyStaticExpenses();

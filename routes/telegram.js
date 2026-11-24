@@ -9,7 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const { readJSON, writeJSON, nextId } = require('../lib/store');
 const { normalize, findSupplier, includesWord } = require('../lib/convert');
-const { localDateStr, posterCall } = require('../lib/poster');
+const { localDateStr, posterCall, createPosterSupply, posterDateTimeStr, FALLBACK_INGREDIENT_COST, FALLBACK_POSTER_SUPPLIER_ID } = require('../lib/poster');
 const { recognizeInvoiceSummary, recognizeReceiptImage, recognizeStockText, recognizeExpenseText } = require('./recognition');
 const { createInvoice, updateInvoice } = require('./invoices');
 const { createExpenseRecord } = require('./expenses');
@@ -622,6 +622,17 @@ async function handleStockText(chatId, text, submittedByLabel) {
     return;
   }
 
+  // ОлегКруасан exception (2026-11-24): булочки/круасани have fixed, known per-piece costs
+  // (FALLBACK_INGREDIENT_COST) and он ніколи не присилає ціну — немає сенсу питати суму чи
+  // заводити накладну для бухгалтера/реєстру. Коли КОЖНА розпізнана позиція — його товар, пушимо
+  // прихід у Poster одразу і дублюємо тільки адміну; будь-яка інша позиція в тому ж повідомленні
+  // (не його товар) повертає це до звичайного флоу нижче (накладна + сума + бухгалтер+адмін).
+  const isOlegOrder = matched.every(i => FALLBACK_INGREDIENT_COST[i.ingredientId] !== undefined);
+  if (isOlegOrder) {
+    await handleOlegCroissantStock(chatId, matched, unmatched, text, submittedByLabel);
+    return;
+  }
+
   const pending = await readJSON('pendingStockAmount.json', {});
   pending[chatId] = { items: matched, unmatched, rawText: text, submittedBy: submittedByLabel, timestamp: new Date().toISOString() };
   await writeJSON('pendingStockAmount.json', pending);
@@ -634,6 +645,53 @@ async function handleStockText(chatId, text, submittedByLabel) {
   }
   lines.push('', '💰 На яку суму (всього), ₴? Напишіть, будь ласка, число.');
   await reply(chatId, lines.join('\n'));
+}
+
+// ОлегКруасан exception (2026-11-24): fixed per-piece cost (FALLBACK_INGREDIENT_COST), no price
+// question, no накладна/реєстр entry, no бухгалтер — straight to Poster, admin gets an FYI copy.
+// Kept separate from handleStockAmountReply's накладна-based path entirely (no debt/payment
+// tracking needed — Олег is paid in cash/by hand outside this app).
+async function handleOlegCroissantStock(chatId, matched, unmatched, rawText, submittedByLabel) {
+  const suppliers = await readJSON('suppliers.json', []);
+  const oleg = suppliers.find(s => s.name === 'ОлегКруасан');
+  const posterSupplierId = oleg?.posterSupplierId || FALLBACK_POSTER_SUPPLIER_ID;
+
+  let pushed = false;
+  try {
+    await createPosterSupply({
+      date: posterDateTimeStr(),
+      supplierId: posterSupplierId,
+      items: matched.map(i => ({ ingredientId: i.ingredientId, type: 4, qty: i.qty, sum: FALLBACK_INGREDIENT_COST[i.ingredientId] }))
+    });
+    pushed = true;
+  } catch (e) {
+    console.error('ОлегКруасан auto-push to Poster failed:', e);
+  }
+
+  const itemLines = matched.map(i => `• ${i.name}: ${i.qty} ${unitLabel(i.unit)}`).join('\n');
+  const amount = matched.reduce((s, i) => s + i.qty * FALLBACK_INGREDIENT_COST[i.ingredientId], 0);
+
+  await reply(chatId, pushed
+    ? `✅ Записав прихід від Олега і додав у Poster:\n${itemLines}\nСума: ${amount.toFixed(2)} ₴`
+    : `⚠️ Розпізнав прихід від Олега, але НЕ вдалось додати в Poster — додайте вручну:\n${itemLines}\nСума: ${amount.toFixed(2)} ₴`);
+
+  const recipients = await readJSON('telegramRecipients.json', []);
+  const admins = recipients.filter(r => r.role === 'admin' && String(r.chatId) !== chatId);
+  for (const r of admins) {
+    try {
+      await reply(r.chatId, (pushed
+        ? `🥐 Прихід від Олега через ${submittedByLabel} — автоматично записано в Poster (${amount.toFixed(2)} ₴):\n`
+        : `🥐⚠️ Прихід від Олега через ${submittedByLabel} — НЕ вдалось записати в Poster, перевірте вручну (${amount.toFixed(2)} ₴):\n`) + itemLines);
+    } catch (e) { console.error('Oleg stock admin notify failed:', e); }
+  }
+
+  const log = await readJSON('textSupplies.json', []);
+  log.push({
+    id: nextId(log), date: localDateStr(), timestamp: new Date().toISOString(), submittedBy: submittedByLabel,
+    rawText, amount, matched: matched.map(i => ({ name: i.name, rawName: i.rawName, qty: i.qty, unit: i.unit })),
+    unmatched, postedToPoster: pushed, supplier: 'ОлегКруасан'
+  });
+  await writeJSON('textSupplies.json', log);
 }
 
 // Follow-up to handleStockText — the waiter's reply is expected to be just a number (total ₴ paid
@@ -708,51 +766,11 @@ async function handleStockAmountReply(chatId, text, pendingEntry, recipients) {
   return true;
 }
 
-// Бухгалтер's reply to the 15th-of-month reminder (scripts/monthly-accountant-reminder.js) —
-// "Податки: 10грн, Комуналка: 10грн" or similar free text. The target month was fixed by that
-// reminder (pendingAccountantReport.json), not derived from whenever she actually replies, since
-// she might answer hours or days later. Creates one expenses.json entry per recognized category.
-async function handleAccountantExpenseText(chatId, text, month) {
-  await reply(chatId, '📝 Записую витрати...');
-
-  let parsed;
-  try {
-    parsed = await recognizeExpenseText(text, EXPENSE_CATEGORIES);
-  } catch (e) {
-    await reply(chatId, '⚠️ Не вдалось розпізнати текст. Спробуйте, наприклад: "Податки: 10000грн, Комуналка: 8000грн".');
-    return;
-  }
-
-  if (!parsed.items.length) {
-    await reply(chatId, '⚠️ Не знайшов жодної суми у повідомленні. Спробуйте, наприклад: "Податки: 10000грн".');
-    return;
-  }
-
-  const date = `${month}-01`;
-  const expenses = await readJSON('expenses.json', []);
-  const created = [];
-  for (const item of parsed.items) {
-    const expense = await createExpenseRecord(expenses, {
-      date, category: item.category, description: `Звіт бухгалтера за ${month} (через бот)`, amount: item.amount
-    });
-    created.push(expense);
-  }
-  await writeJSON('expenses.json', expenses);
-
-  await reply(chatId,
-    `✅ Записано за ${month}:\n${created.map(e =>
-      `${e.category}: ${e.amount.toFixed(2)} ₴${e.postedToPoster ? '' : ' (⚠️ не вдалось синхронізувати з Poster)'}`).join('\n')}`);
-
-  const recipients = await readJSON('telegramRecipients.json', []);
-  const toNotify = recipients.filter(r => r.role === 'admin' && String(r.chatId) !== chatId);
-  for (const r of toNotify) {
-    await reply(r.chatId,
-      `💸 Бухгалтер записала витрати за ${month}:\n${created.map(e => `${e.category}: ${e.amount.toFixed(2)} ₴`).join('\n')}`);
-  }
-}
-
-// Admin reports an expense spontaneously, any time ("Витрата: Комуналка 7200грн") — dated today,
-// no pending reminder state needed (unlike handleAccountantExpenseText above). Known categories
+// Admin reports an expense spontaneously, any time ("Витрата: Комуналка 7200грн") — dated today.
+// (2026-11-24: the old handleAccountantExpenseText — бухгалтер replying to the 15th-of-month
+// reminder with "Податки: Х, Комуналка: У" — was removed. The bot now only reminds her ONCE on
+// the 15th to report those figures to Марина via Viber; Марина enters the expense herself via
+// this same "Витрата: ..." flow or the website, since she's a registered admin.) Known categories
 // (EXPENSE_CATEGORIES + anything admin already confirmed as a new category before, in
 // customExpenseCategories.json) get saved immediately; anything recognizeExpenseText couldn't
 // match gets queued and asked about one at a time via inline buttons (askExpenseCategoryChoice).
@@ -985,21 +1003,9 @@ router.post('/telegram/webhook', async (req, res) => {
         await handleStockText(chatId, message.text.trim(), submittedByLabel);
         return res.sendStatus(200);
       }
-      if (sender.role === 'accountant' && message.text && message.text.trim() && !message.text.startsWith('/')) {
-        const pendingReport = await readJSON('pendingAccountantReport.json', {});
-        const reportEntry = pendingReport[chatId];
-        // Same reasoning as pendingStockAmount above — without an expiry, бухгалтер ignoring one
-        // monthly reminder means ANY later message containing recognizable amounts (even about
-        // something unrelated) gets silently attributed to that stale month's tax/utility report.
-        const reportFresh = reportEntry && (Date.now() - new Date(reportEntry.timestamp).getTime()) < 10 * 24 * 60 * 60 * 1000;
-        if (reportFresh) {
-          delete pendingReport[chatId];
-          await writeJSON('pendingAccountantReport.json', pendingReport);
-          await handleAccountantExpenseText(chatId, message.text.trim(), reportEntry.month);
-          return res.sendStatus(200);
-        }
-        if (reportEntry) { delete pendingReport[chatId]; await writeJSON('pendingAccountantReport.json', pendingReport); }
-      }
+      // 2026-11-24: бухгалтер no longer reports Комуналка/Податки through the bot — the 15th-of-
+      // month reminder now just tells her to send those figures to Марина (Viber), who enters them
+      // herself. Any free text she sends here falls through to the generic reply below.
       await reply(chatId, sender.role === 'accountant'
         ? 'Надішліть фото чека про оплату — я знайду відповідну накладну за сумою боргу.'
         : 'Надішліть фото накладної — я розпізнаю і додам її на перевірку, або просто напишіть текстом, що привезли (наприклад: "Круасан 8 шт").');
